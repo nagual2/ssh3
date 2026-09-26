@@ -543,16 +543,27 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 		isATTY := term.IsTerminal(int(tty.Fd()))
 
 		windowSize, err := winsize.GetWinsize(tty)
-		if err != nil {
+		hasWinSize := err == nil
+		if isATTY && !hasWinSize {
+			// some Windows consoles do not expose a queryable size via stdin:
+			// a PTY with a default geometry still beats a raw-pipe session
+			log.Warn().Msgf("could not get window size: %+v, using 80x24", err)
+			windowSize.NCols = 80
+			windowSize.NRows = 24
+		} else if !hasWinSize {
 			log.Warn().Msgf("could not get window size: %+v", err)
 		}
-		hasWinSize := err == nil
-		if isATTY && hasWinSize {
+		if isATTY {
+			termType := os.Getenv("TERM")
+			if termType == "" {
+				// remote ncurses programs expect a terminal type to be set
+				termType = "xterm"
+			}
 			err = channel.SendRequest(
 				&ssh3Messages.ChannelRequestMessage{
 					WantReply: true,
 					ChannelRequest: &ssh3Messages.PtyRequest{
-						Term:        os.Getenv("TERM"),
+						Term:        termType,
 						CharWidth:   uint64(windowSize.NCols),
 						CharHeight:  uint64(windowSize.NRows),
 						PixelWidth:  uint64(windowSize.PixelWidth),
@@ -589,6 +600,9 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 			} else {
 				defer term.Restore(int(fd), oldState)
 			}
+			// full-screen remote apps (vim, mc) speak ANSI: the local console
+			// must interpret escape sequences too
+			defer enableConsoleVT()()
 			go forwardSessionSignals(ctx, channel)
 			if hasWinSize {
 				go forwardWindowChanges(ctx, channel, tty)

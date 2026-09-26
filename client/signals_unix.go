@@ -23,6 +23,11 @@ var forwardedSignals = map[syscall.Signal]string{
 	syscall.SIGUSR2: "USR2",
 }
 
+// enableConsoleVT is a no-op: unix terminals process escape sequences natively.
+func enableConsoleVT() (restore func()) {
+	return func() {}
+}
+
 func forwardWindowChanges(ctx context.Context, channel ssh3.Channel, tty *os.File) {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGWINCH)

@@ -5,6 +5,7 @@ package unix_util
 import (
 	"runtime"
 	"strconv"
+	"strings"
 
 	"fmt"
 	"os"
@@ -12,6 +13,25 @@ import (
 
 	"github.com/rs/zerolog/log"
 )
+
+// userShell returns the account's login shell from /etc/passwd, falling back
+// to /bin/sh (os/user does not expose the shell field).
+func userShell(username string) string {
+	passwdBytes, err := os.ReadFile("/etc/passwd")
+	if err != nil {
+		return "/bin/sh"
+	}
+	for _, line := range strings.Split(string(passwdBytes), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) >= 7 && fields[0] == username {
+			if fields[6] != "" {
+				return fields[6]
+			}
+			break
+		}
+	}
+	return "/bin/sh"
+}
 
 func getUser(username string) (*User, error) {
 	u, err := osuser.Lookup(username)
@@ -63,7 +83,7 @@ func getUser(username string) (*User, error) {
 		Uid:      uid,
 		Gid:      gid,
 		Dir:      u.HomeDir,
-		Shell:    "/bin/sh",
+		Shell:    userShell(u.Username),
 	}, nil
 }
 

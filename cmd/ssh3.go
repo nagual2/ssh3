@@ -449,7 +449,13 @@ func ClientMain() int {
 
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
-		tty = nil
+		if runtime.GOOS == "windows" {
+			// there is no /dev/tty on Windows: the console is reached
+			// through the standard input handle
+			tty = os.Stdin
+		} else {
+			tty = nil
+		}
 	}
 
 	urlFromParam := args[0]

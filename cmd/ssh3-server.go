@@ -15,8 +15,12 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	_ "net/http/pprof"
@@ -126,6 +130,13 @@ func setupEnv(user *unix_util.User, runningCommand *runningCommand, authAgentSoc
 		fmt.Sprintf("USER=%s", user.Username),
 		fmt.Sprintf("PATH=%s", "/usr/bin:/bin:/usr/sbin:/sbin"),
 	)
+	// forward the locale settings configured on the server (e.g. via the
+	// systemd unit environment) so that remote programs run in a UTF-8 locale
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "LANG=") || strings.HasPrefix(kv, "LC_") {
+			runningCommand.Cmd.Env = append(runningCommand.Cmd.Env, kv)
+		}
+	}
 	if authAgentSocketPath != "" {
 		runningCommand.Cmd.Env = append(runningCommand.Cmd.Env, fmt.Sprintf("SSH_AUTH_SOCK=%s", authAgentSocketPath))
 	}
@@ -534,7 +545,76 @@ func newCommand(user *unix_util.User, channel ssh3.Channel, loginShell bool, com
 	return execCmdInBackground(channel, user, session)
 }
 
+// sessionBanner returns a compact system stats block printed before the
+// shell prompt on interactive logins.
+func sessionBanner(user *unix_util.User) string {
+	host, _ := os.Hostname()
+	now := time.Now().Format("Mon 2006-01-02 15:04:05 MST")
+	uptimeStr, loadStr := "unknown", "unknown"
+	if data, err := os.ReadFile("/proc/uptime"); err == nil {
+		if fields := strings.Fields(string(data)); len(fields) > 0 {
+			if secs, err := strconv.ParseFloat(fields[0], 64); err == nil {
+				uptimeStr = fmt.Sprintf("%dd %02dh %02dm", int(secs)/86400, (int(secs)%86400)/3600, (int(secs)%3600)/60)
+			}
+		}
+	}
+	if data, err := os.ReadFile("/proc/loadavg"); err == nil {
+		if fields := strings.Fields(string(data)); len(fields) >= 3 {
+			loadStr = strings.Join(fields[:3], " ")
+		}
+	}
+	memStr := "unknown"
+	if data, err := os.ReadFile("/proc/meminfo"); err == nil {
+		var totalKb, availKb uint64
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			value, _ := strconv.ParseUint(fields[1], 10, 64)
+			switch {
+			case strings.HasPrefix(line, "MemTotal:"):
+				totalKb = value
+			case strings.HasPrefix(line, "MemAvailable:"):
+				availKb = value
+			}
+		}
+		if totalKb > 0 && availKb <= totalKb {
+			used := totalKb - availKb
+			memStr = fmt.Sprintf("%.1f/%.1f GiB (%.0f%%)", float64(used)/(1<<20), float64(totalKb)/(1<<20), 100*float64(used)/float64(totalKb))
+		}
+	}
+	diskStr := "unknown"
+	var fs syscall.Statfs_t
+	if err := syscall.Statfs("/", &fs); err == nil {
+		total := fs.Blocks * uint64(fs.Bsize)
+		used := total - fs.Bavail*uint64(fs.Bsize)
+		if total > 0 {
+			diskStr = fmt.Sprintf("%.0fG/%.0fG (%.0f%%)", float64(used)/1e9, float64(total)/1e9, 100*float64(used)/float64(total))
+		}
+	}
+	kernel := ""
+	if data, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
+		kernel = strings.TrimSpace(string(data))
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "\r\n ssh3 session: %s@%s\r\n", user.Username, host)
+	fmt.Fprintf(&b, " -------------------------------------------------------\r\n")
+	fmt.Fprintf(&b, "  date    : %s\r\n", now)
+	fmt.Fprintf(&b, "  kernel  : Linux %s %s\r\n", kernel, runtime.GOARCH)
+	fmt.Fprintf(&b, "  uptime  : %s (load: %s)\r\n", uptimeStr, loadStr)
+	fmt.Fprintf(&b, "  memory  : %s\r\n", memStr)
+	fmt.Fprintf(&b, "  disk /  : %s\r\n", diskStr)
+	fmt.Fprintf(&b, " -------------------------------------------------------\r\n")
+	return b.String()
+}
+
 func newShellReq(user *unix_util.User, channel ssh3.Channel, wantReply bool) error {
+	// show system stats before the shell prompt (interactive sessions only,
+	// exec requests go through newCommand and are not polluted)
+	if _, err := channel.WriteData([]byte(sessionBanner(user)), ssh3Messages.SSH_EXTENDED_DATA_NONE); err != nil {
+		log.Warn().Msgf("could not write session banner: %s", err)
+	}
 	return newCommand(user, channel, true, user.Shell)
 }
 
