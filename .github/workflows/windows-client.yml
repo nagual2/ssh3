@@ -1,0 +1,46 @@
+name: Windows client
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cross-compile:
+    runs-on: ubuntu-latest
+    env:
+      # the vendored Rust h3 shim has no Go modules.txt: keep Go in module mode
+      GOFLAGS: -mod=mod
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build Windows client (amd64)
+        run: CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -mod=mod -tags disable_password_auth -ldflags "-s -w" -o dist/ssh3-windows-amd64.exe ./cmd/ssh3
+      - name: Build Windows client (arm64)
+        run: CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -mod=mod -tags disable_password_auth -ldflags "-s -w" -o dist/ssh3-windows-arm64.exe ./cmd/ssh3
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ssh3-windows-clients
+          path: dist/
+          if-no-files-found: error
+
+  native-smoke:
+    runs-on: windows-latest
+    env:
+      GOFLAGS: -mod=mod
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build Windows client natively
+        run: go build -mod=mod -tags disable_password_auth -o ssh3.exe ./cmd/ssh3
+      - name: Smoke test
+        run: ./ssh3.exe -version
