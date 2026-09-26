@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/signal"
 	"strings"
 	"syscall"
 	"time"
@@ -55,15 +54,6 @@ func (e NoSuitableIdentity) Error() string {
 	return "no suitable identity found"
 }
 
-var forwardedSignals = map[syscall.Signal]string{
-	syscall.SIGHUP:  "HUP",
-	syscall.SIGINT:  "INT",
-	syscall.SIGQUIT: "QUIT",
-	syscall.SIGTERM: "TERM",
-	syscall.SIGUSR1: "USR1",
-	syscall.SIGUSR2: "USR2",
-}
-
 func sendWindowChangeRequest(channel ssh3.Channel, tty *os.File) error {
 	windowSize, err := winsize.GetWinsize(tty)
 	if err != nil {
@@ -80,58 +70,6 @@ func sendWindowChangeRequest(channel ssh3.Channel, tty *os.File) error {
 			},
 		},
 	)
-}
-
-func forwardWindowChanges(ctx context.Context, channel ssh3.Channel, tty *os.File) {
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGWINCH)
-	defer signal.Stop(signals)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-signals:
-			if err := sendWindowChangeRequest(channel, tty); err != nil {
-				log.Warn().Msgf("could not send window change request: %s", err)
-				return
-			}
-		}
-	}
-}
-
-func forwardSessionSignals(ctx context.Context, channel ssh3.Channel) {
-	signals := make(chan os.Signal, len(forwardedSignals))
-	notifiedSignals := make([]os.Signal, 0, len(forwardedSignals))
-	for signal := range forwardedSignals {
-		notifiedSignals = append(notifiedSignals, signal)
-	}
-	signal.Notify(signals, notifiedSignals...)
-	defer signal.Stop(signals)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case receivedSignal := <-signals:
-			signalName, ok := forwardedSignals[receivedSignal.(syscall.Signal)]
-			if !ok {
-				continue
-			}
-			err := channel.SendRequest(
-				&ssh3Messages.ChannelRequestMessage{
-					WantReply: false,
-					ChannelRequest: &ssh3Messages.SignalRequest{
-						SignalNameWithoutSig: signalName,
-					},
-				},
-			)
-			if err != nil {
-				log.Warn().Msgf("could not send signal request for %s: %s", signalName, err)
-				return
-			}
-		}
-	}
 }
 
 func forwardAgent(parent context.Context, channel ssh3.Channel) error {
