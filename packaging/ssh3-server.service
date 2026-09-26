@@ -1,0 +1,23 @@
+[Unit]
+Description=SSH3 server (QUIC/HTTP-3, key-only auth)
+Documentation=https://github.com/nagual2/ssh3
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/ssh3/ssh3-server.env
+ExecStart=/usr/bin/ssh3-server -bind [::]:443 -cert /etc/ssh3/cert.pem -key /etc/ssh3/priv.key -url-path /ssh3-term
+Restart=on-failure
+RestartSec=3
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID CAP_NET_BIND_SERVICE CAP_AUDIT_WRITE
+# no ProtectSystem/ProtectHome/PrivateTmp: user sessions must stay able to
+# write (sudo, package management, ~/.bash_history), like a plain sshd
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

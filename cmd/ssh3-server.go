@@ -585,13 +585,8 @@ func sessionBanner(user *unix_util.User) string {
 		}
 	}
 	diskStr := "unknown"
-	var fs syscall.Statfs_t
-	if err := syscall.Statfs("/", &fs); err == nil {
-		total := fs.Blocks * uint64(fs.Bsize)
-		used := total - fs.Bavail*uint64(fs.Bsize)
-		if total > 0 {
-			diskStr = fmt.Sprintf("%.0fG/%.0fG (%.0f%%)", float64(used)/1e9, float64(total)/1e9, 100*float64(used)/float64(total))
-		}
+	if used, total, ok := rootDiskUsage(); ok {
+		diskStr = fmt.Sprintf("%.0fG/%.0fG (%.0f%%)", float64(used)/1e9, float64(total)/1e9, 100*float64(used)/float64(total))
 	}
 	kernel := ""
 	if data, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {

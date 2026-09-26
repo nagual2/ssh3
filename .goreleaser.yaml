@@ -1,0 +1,123 @@
+# goreleaser v2 release pipeline for nagual2/ssh3.
+# Triggered by .github/workflows/release.yml on v* tags.
+version: 2
+
+project_name: ssh3
+
+builds:
+  - id: client
+    main: ./cmd/ssh3/main.go
+    binary: ssh3
+    env:
+      - CGO_ENABLED=0
+      - GOFLAGS=-mod=mod
+    # vendor/ holds the Rust h3 shim (no Go modules.txt): keep module mode
+    flags:
+      - -mod=mod
+    goos:
+      - linux
+      - darwin
+      - windows
+      - freebsd
+      - openbsd
+    goarch:
+      - amd64
+      - arm64
+      - arm
+    ignore:
+      - goos: darwin
+        goarch: arm
+      - goos: windows
+        goarch: arm
+      - goos: freebsd
+        goarch: arm
+      - goos: openbsd
+        goarch: arm
+      - goos: openbsd
+        goarch: arm64
+    tags:
+      - osusergo
+      - netgo
+      - static_build
+      - disable_password_auth
+    ldflags:
+      - -s -w
+
+  - id: server
+    main: ./cmd/ssh3-server/main.go
+    binary: ssh3-server
+    env:
+      - CGO_ENABLED=0
+      - GOFLAGS=-mod=mod
+    flags:
+      - -mod=mod
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+      - arm
+    tags:
+      - osusergo
+      - netgo
+      - static_build
+      - disable_password_auth
+    ldflags:
+      - -s -w
+
+archives:
+  - id: client
+    builds:
+      - client
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_client_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+  - id: server
+    builds:
+      - server
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_server_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+nfpms:
+  - id: ssh3
+    package_name: ssh3
+    ids:
+      - client
+      - server
+    file_name_template: "{{ .ConventionalFileName }}"
+    vendor: nagual2
+    homepage: https://github.com/nagual2/ssh3
+    maintainer: Max <max@localhost>
+    description: |-
+      SSH3 - Secure Shell over QUIC/HTTP-3 (server and client).
+      Key-only authentication build: password auth is compiled out
+      (disable_password_auth build tag), no OIDC configured.
+    license: Apache-2.0
+    formats:
+      - deb
+    dependencies:
+      - openssl
+      - systemd
+    bindir: /usr/bin
+    contents:
+      - src: packaging/ssh3-server.service
+        dst: /usr/lib/systemd/system/ssh3-server.service
+      - src: packaging/ssh3-server.env
+        dst: /etc/ssh3/ssh3-server.env
+        type: config
+    scripts:
+      postinstall: packaging/postinst
+      preremove: packaging/prerm
+
+changelog:
+  disable: true
