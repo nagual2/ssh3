@@ -1,3 +1,6 @@
+# Copyright 2026 The nagual2 ssh3 Authors.
+# SPDX-License-Identifier: Apache-2.0
+
 [Unit]
 Description=SSH3 server (QUIC/HTTP-3, key-only auth)
 Documentation=https://github.com/nagual2/ssh3

@@ -1,3 +1,6 @@
+# Copyright 2026 The nagual2 ssh3 Authors.
+# SPDX-License-Identifier: Apache-2.0
+
 # goreleaser v2 release pipeline for nagual2/ssh3.
 # Triggered by .github/workflows/release.yml on v* tags.
 version: 2

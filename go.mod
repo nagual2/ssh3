@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 (fork changes: nagual2, 2026)
 module github.com/francoismichel/ssh3
 
 require (
