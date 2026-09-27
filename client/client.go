@@ -640,6 +640,14 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 				}
 			}
 			if err != nil {
+				if errors.Is(err, io.EOF) {
+					// local stdin is exhausted: half-close the send side of the channel
+					// (QUIC FIN) so the remote command sees the end of its input,
+					// otherwise a command reading until EOF (e.g. `cat > file`) hangs.
+					// The receive half stays open for the command output and exit status.
+					channel.Close()
+					return
+				}
 				fmt.Fprintf(os.Stderr, "could not read data from stdin: %+v", err)
 				return
 			}

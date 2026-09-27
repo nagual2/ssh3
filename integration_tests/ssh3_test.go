@@ -1,6 +1,8 @@
 package integration_tests
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"math/rand"
@@ -256,6 +258,36 @@ var _ = Describe("Testing the ssh3 cli", func() {
 					session, err = Start(commandMinus1, GinkgoWriter, GinkgoWriter)
 					Expect(err).ToNot(HaveOccurred())
 					Eventually(session).Should(Exit(255))
+				})
+
+				It("Should signal EOF to the remote command when the local stdin is exhausted", func() {
+					// Once the local stdin reaches EOF, the client must half-close the
+					// send side of the session channel (QUIC FIN) so that the remote
+					// command sees the end of its input; otherwise a remote command
+					// reading until EOF (e.g. `cat > file`) never terminates.
+					const payloadSize = 8 * 1024 * 1024
+					payload := make([]byte, payloadSize)
+					_, err := rand.Read(payload)
+					Expect(err).ToNot(HaveOccurred())
+					expectedHash := sha256.Sum256(payload)
+
+					remoteOutPath := path.Join(os.TempDir(), fmt.Sprintf("ssh3-stdin-eof-%d.bin", os.Getpid()))
+					os.Remove(remoteOutPath)
+					defer os.Remove(remoteOutPath)
+
+					clientArgs = append(getClientArgs(rsaPrivKeyPath), "cat", ">", remoteOutPath)
+					command := exec.Command(ssh3Path, clientArgs...)
+					command.Stdin = bytes.NewReader(payload)
+					session, err := Start(command, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred())
+
+					// the client must terminate by itself once its stdin is exhausted
+					Eventually(session, "10s").Should(Exit(0))
+
+					remoteOut, err := os.ReadFile(remoteOutPath)
+					Expect(err).ToNot(HaveOccurred())
+					Expect(remoteOut).To(HaveLen(payloadSize))
+					Expect(sha256.Sum256(remoteOut)).To(Equal(expectedHash))
 				})
 
 				It("Should run the interactive shell in login mode and read .profile", func() {
