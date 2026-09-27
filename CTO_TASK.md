@@ -20,9 +20,12 @@ What already works (do not re-litigate, build on it):
 Build notes (reproduce before hacking):
 
 ```bash
-# Go: upstream vendor/ dir is stale — use module mode
-CGO_ENABLED=0 go build -mod=mod -tags disable_password_auth -o bin/ssh3 ./cmd/ssh3
-CGO_ENABLED=0 go build -mod=mod -tags disable_password_auth -o bin/ssh3-server ./cmd/ssh3-server
+# Go: vendor/ is a synced Go module tree since 2026-09-27 — plain
+# `go build ./...` / `go test ./...` work; -mod=mod is no longer needed.
+# TRAP: `go mod vendor` deletes vendor/h3 (see §2 shim note above).
+# If nuked, restore with: git checkout dba4017 -- vendor/h3
+CGO_ENABLED=0 go build -tags disable_password_auth -o bin/ssh3 ./cmd/ssh3
+CGO_ENABLED=0 go build -tags disable_password_auth -o bin/ssh3-server ./cmd/ssh3-server
 # Server needs a writable log target: env SSH3_LOG_FILE=/tmp/ssh3.log (default /var/log/ssh3.log fails unprivileged)
 ```
 
