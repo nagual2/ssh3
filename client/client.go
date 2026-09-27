@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -628,6 +629,13 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 		return err
 	}
 
+	// Synchronized between the stdin pump below and the session loop: the send
+	// half is closed (QUIC FIN) only after every local input byte was handed
+	// to the channel. An exit status received while it is still open means the
+	// remote command stopped consuming input early and the transfer was
+	// truncated (CTO task stage 1, bug 3).
+	var inputSent atomic.Bool
+
 	go func() {
 		buf := make([]byte, channel.MaxPacketSize())
 		for {
@@ -645,6 +653,7 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 					// (QUIC FIN) so the remote command sees the end of its input,
 					// otherwise a command reading until EOF (e.g. `cat > file`) hangs.
 					// The receive half stays open for the command output and exit status.
+					inputSent.Store(true)
 					channel.Close()
 					return
 				}
@@ -681,8 +690,20 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 				fmt.Fprintf(os.Stderr, "receiving a signal request on the client is not implemented\n")
 			case *ssh3Messages.ExitStatusRequest:
 				log.Info().Msgf("ssh3: process exited with status: %d\n", requestMessage.ExitStatus)
+				exitStatus := int(requestMessage.ExitStatus)
+				if !inputSent.Load() {
+					// short grace for the stdin pump: its final EOF read races
+					// with a fast remote exit on an exact-size input
+					time.Sleep(100 * time.Millisecond)
+				}
+				if !inputSent.Load() {
+					fmt.Fprintf(os.Stderr, "ssh3: remote command exited before all input was sent; the transfer was truncated\n")
+					// forward a distinct local error instead of the remote's
+					// success status, which would mask the data loss
+					exitStatus = 255
+				}
 				// forward the process' status code to the user
-				return ExitStatus{StatusCode: int(requestMessage.ExitStatus)}
+				return ExitStatus{StatusCode: exitStatus}
 			case *ssh3Messages.ExitSignalRequest:
 				log.Info().Msgf("ssh3: process exited with signal: %s: %s\n", requestMessage.SignalNameWithoutSig, requestMessage.ErrorMessageUTF8)
 				return ExitSignal{Signal: requestMessage.SignalNameWithoutSig, ErrorMessageUTF8: requestMessage.ErrorMessageUTF8}
