@@ -41,7 +41,7 @@ Grab the assets from the [latest release](https://github.com/nagual2/ssh3/releas
 Install the Debian package:
 
 ```bash
-sudo dpkg -i ssh3_0.1.10_amd64.deb
+sudo dpkg -i ssh3_0.1.11_amd64.deb
 ```
 
 The service listens on UDP 443 under the secret URL path `/ssh3-term`. Configuration lives in `/etc/ssh3/ssh3-server.env` (log file and level, `LANG`), the systemd unit in `/usr/lib/systemd/system/ssh3-server.service`, and a self-signed ed25519 certificate with IP/DNS SANs is generated in `/etc/ssh3/` on install if missing.

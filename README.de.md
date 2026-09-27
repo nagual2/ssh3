@@ -41,7 +41,7 @@ Die Assets gibt es im [neuesten Release](https://github.com/nagual2/ssh3/release
 Installation des Debian-Pakets:
 
 ```bash
-sudo dpkg -i ssh3_0.1.10_amd64.deb
+sudo dpkg -i ssh3_0.1.11_amd64.deb
 ```
 
 Der Dienst lauscht auf UDP 443 unter dem geheimen URL-Pfad `/ssh3-term`. Die Konfiguration liegt in `/etc/ssh3/ssh3-server.env` (Logdatei und -level, `LANG`), die systemd-Unit in `/usr/lib/systemd/system/ssh3-server.service`; ein selbstsigniertes ed25519-Zertifikat mit IP/DNS-SANs wird bei der Installation in `/etc/ssh3/` erzeugt, falls es fehlt.
