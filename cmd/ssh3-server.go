@@ -295,6 +295,19 @@ func waitForRunningCommandAfterInputEOF(ctx context.Context, channel ssh3.Channe
 	}
 }
 
+// safeExitStatus converts an os/exec exit code into a wire-safe SSH3 exit
+// status. A process that died by signal reports a negative exit code (-1),
+// which after a uint64 conversion overflows the 62-bit QUIC varint and
+// panicked the server in VarIntLen while encoding the exit-status request.
+// OpenSSH sends an exit-signal request in this case; until that is
+// implemented, 255 marks the abnormal termination.
+func safeExitStatus(exitCode int) uint64 {
+	if exitCode < 0 {
+		return 255
+	}
+	return uint64(exitCode)
+}
+
 func execCmdInBackground(channel ssh3.Channel, user *unix_util.User, session *runningSession) error {
 	runningCommand := session.runningCmd
 	openPty := session.pty
@@ -417,7 +430,7 @@ func execCmdInBackground(channel ssh3.Channel, user *unix_util.User, session *ru
 					execExitStatus = uint64(0)
 					if err != nil {
 						if exitError, ok := err.(*exec.ExitError); ok {
-							execExitStatus = uint64(exitError.ExitCode())
+							execExitStatus = safeExitStatus(exitError.ExitCode())
 						}
 					}
 				}
