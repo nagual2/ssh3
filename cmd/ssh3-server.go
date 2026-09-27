@@ -1069,18 +1069,27 @@ func ServerMain() int {
 									waitForRunningCommandAfterInputEOF(conv.Context(), channel, runningSession)
 									// the exec goroutine sends the exit status once the
 									// command completes; its send races with the deferred
-									// channel.Close() below, so wait for it — otherwise a
-									// half-closing client sees a bare EOF instead of the
-									// status (fast commands like `exit 42` lost it)
+									// channel.Close() below, so wait for it — otherwise the
+									// channel FIN would go out before the status frame was
+									// even written (fast commands like `exit 42` lost it)
 									if runningSession.runningCmd != nil {
-										// conv.Context() is already canceled here (the client's
-										// half-close ends the request body), so only the sentinel
-										// guards this wait; the timeout bounds a wedged exec
-										// goroutine
+										// the timeout bounds a wedged exec goroutine
 										select {
 										case <-runningSession.exitStatusSent:
 										case <-time.After(time.Second):
 										}
+										// The exit-status frame was written to the QUIC send
+										// stream, but it only becomes a packet when the stack's
+										// run loop assembles one. Closing the channel and the
+										// conversation immediately after the write tears the
+										// whole connection down before that happens, and a
+										// half-closing client then sees a bare EOF instead of
+										// the status (fast commands like `exit 42` lost it).
+										// QUIC exposes no flush callback, so yield briefly to
+										// let the packer pick the buffered frame up; the client
+										// still receives the status well before its next read
+										// would time out.
+										time.Sleep(100 * time.Millisecond)
 									}
 								}
 							}
