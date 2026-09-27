@@ -175,7 +175,10 @@ func (m *PrivkeyFileAuthMethod) PrepareRequestForAuth(request *http.Request, ssh
 			return err
 		}
 	} else if err != nil {
-		log.Warn().Msgf("Could not load private key: %s", err)
+		// a nil signing key would panic in BuildJWTBearerToken: abort this
+		// auth method with the load error instead of logging and falling through
+		log.Error().Msgf("could not load private key: %s", err)
+		return err
 	}
 
 	bearerToken, err := ssh3.BuildJWTBearerToken(signingMethod, jwtBearerKey, username, conversation)
