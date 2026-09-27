@@ -13,14 +13,16 @@ EnvironmentFile=/etc/ssh3/ssh3-server.env
 ExecStart=/usr/bin/ssh3-server -bind [::]:443 -cert /etc/ssh3/cert.pem -key /etc/ssh3/priv.key -url-path /ssh3-term
 Restart=on-failure
 RestartSec=3
-CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETGID CAP_SETUID CAP_NET_BIND_SERVICE CAP_AUDIT_WRITE
-# no ProtectSystem/ProtectHome/PrivateTmp: user sessions must stay able to
-# write (sudo, package management, ~/.bash_history), like a plain sshd
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictRealtime=yes
-SystemCallArchitectures=native
-
+# sshd parity: daemon restart must not kill active user sessions
+KillMode=process
+# OpenSSH-parity security model (per-session uid drop lives in
+# util/unix_util/user.go: the root daemon spawns every session with the
+# authenticated user's uid/gid). No sandbox directives here on purpose:
+# CapabilityBoundingSet / NoNewPrivileges / Protect* / Restrict* apply to the
+# whole cgroup, so they would clip capabilities that sudo regains inside a
+# session — root could not run tcpdump, trafshow, modprobe or sysctl (EPERM),
+# which OpenSSH sessions can. The trust boundary is key-only auth
+# (disable_password_auth build tag), not unit-level sandboxing. This mirrors
+# Debian's ssh.service, which ships no such directives either.
 [Install]
 WantedBy=multi-user.target
