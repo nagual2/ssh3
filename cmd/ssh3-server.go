@@ -111,6 +111,10 @@ type runningSession struct {
 	runningCmdDone      chan struct{}
 	authAgentSocketPath string
 	closeInputOnce      sync.Once
+	// closed when the exec goroutine finished (exit status sent or abandoned);
+	// the session loop waits for it on input EOF so the exit status wins the
+	// race against the deferred channel.Close()
+	exitStatusSent chan struct{}
 }
 
 // var runningSessions = make(map[ssh3.Channel]*runningSession)
@@ -309,6 +313,8 @@ func safeExitStatus(exitCode int) uint64 {
 }
 
 func execCmdInBackground(channel ssh3.Channel, user *unix_util.User, session *runningSession) error {
+	// closed on every return path of this function; see runningSession
+	defer close(session.exitStatusSent)
 	runningCommand := session.runningCmd
 	openPty := session.pty
 	log.Debug().Msgf(
@@ -1034,14 +1040,19 @@ func ServerMain() int {
 			default:
 				log.Debug().Msgf("accepted session channel %d of type %q", channel.ChannelID(), channel.ChannelType())
 				runningSessions.Insert(channel, &runningSession{
-					channelState: LARVAL,
-					pty:          nil,
-					runningCmd:   nil,
+					channelState:   LARVAL,
+					pty:            nil,
+					runningCmd:     nil,
+					exitStatusSent: make(chan struct{}),
 				})
 				go func() {
 					// handle the main sessionChannel, once it ends, the whole conversation ends
-					defer channel.Close()
+					// LIFO order matters: the channel (with its buffered exit-status
+					// frame) must close with a FIN before the conversation teardown,
+					// otherwise the conversation close resets the stream and the
+					// client loses the exit status of fast-exiting commands
 					defer conv.Close()
+					defer channel.Close()
 					for {
 						genericMessage, err := channel.NextMessage()
 						if errors.Is(err, net.ErrClosed) {
@@ -1056,6 +1067,21 @@ func ServerMain() int {
 								runningSession, ok := runningSessions.Get(channel)
 								if ok {
 									waitForRunningCommandAfterInputEOF(conv.Context(), channel, runningSession)
+									// the exec goroutine sends the exit status once the
+									// command completes; its send races with the deferred
+									// channel.Close() below, so wait for it — otherwise a
+									// half-closing client sees a bare EOF instead of the
+									// status (fast commands like `exit 42` lost it)
+									if runningSession.runningCmd != nil {
+										// conv.Context() is already canceled here (the client's
+										// half-close ends the request body), so only the sentinel
+										// guards this wait; the timeout bounds a wedged exec
+										// goroutine
+										select {
+										case <-runningSession.exitStatusSent:
+										case <-time.After(time.Second):
+										}
+									}
 								}
 							}
 							return
