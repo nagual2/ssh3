@@ -541,6 +541,11 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 		}()
 	}
 
+	// A PTY session is interactive: its stdin never "finishes" while the user
+	// keeps the session open, so an exit status arriving with input still
+	// pending is the normal end of the session, not a truncated pipe transfer.
+	ptyRequested := false
+
 	if len(command) == 0 {
 		// avoid requesting a pty on the other side if stdin is not a pty
 		// similar behaviour to OpenSSH
@@ -580,6 +585,7 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 				fmt.Fprintf(os.Stderr, "Could send pty request: %+v", err)
 				return err
 			}
+			ptyRequested = true
 			log.Debug().Msgf("sent pty request for session")
 		}
 
@@ -691,12 +697,12 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 			case *ssh3Messages.ExitStatusRequest:
 				log.Info().Msgf("ssh3: process exited with status: %d\n", requestMessage.ExitStatus)
 				exitStatus := int(requestMessage.ExitStatus)
-				if !inputSent.Load() {
+				if !ptyRequested && !inputSent.Load() {
 					// short grace for the stdin pump: its final EOF read races
 					// with a fast remote exit on an exact-size input
 					time.Sleep(100 * time.Millisecond)
 				}
-				if !inputSent.Load() {
+				if !ptyRequested && !inputSent.Load() {
 					fmt.Fprintf(os.Stderr, "ssh3: remote command exited before all input was sent; the transfer was truncated\n")
 					// forward a distinct local error instead of the remote's
 					// success status, which would mask the data loss
