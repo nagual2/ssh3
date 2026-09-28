@@ -178,6 +178,35 @@ Beim Release-Server:
 ssh3 max@my-server.example.org/ssh3-term -privkey ~/.ssh/id_ed25519
 ```
 
+### Dateiübertragung
+
+Stage 2 ergänzt den `ssh3 -f`-Modus über einen dedizierten SFTP-Kanal (der
+Server stellt `pkg/sftp` bereit, eingesperrt im Home-Verzeichnis des
+Sitzungsbenutzers; angelegte Dateien gehören diesem Benutzer):
+
+```bash
+# Datei hochladen (Remote-Operand zuletzt)
+ssh3 -f ~/report.pdf max@my-server.example.org/ssh3-term:docs/report.pdf
+
+# Verzeichnis rekursiv hochladen
+ssh3 -f -r ~/project-dir max@my-server.example.org/ssh3-term:backups/
+
+# Herunterladen (Remote-Operand zuerst)
+ssh3 -f max@my-server.example.org/ssh3-term:logs/app.log ./app.log
+
+# Unterbrochene Übertragungen fortsetzen statt zu überschreiben
+ssh3 -f --continue big-disk-image.raw max@my-server.example.org/ssh3-term:images/raw
+
+# SHA-256-Prüfung durch erneutes Lesen der Remote-Datei erzwingen
+# (automatisch bei Übertragungen über 32 MiB)
+ssh3 -f --checksum data.bin max@my-server.example.org/ssh3-term:data.bin
+```
+
+Hinweise: Standardport 443, URL-Pfad `/ssh3-term`; überschreibbar mit `-P`
+und `-U`, oder als vollständige Form `user@host:port/url_path:remote_path`.
+Unreguläre Dateien (Symlinks, Geräte) werden bei rekursiven Übertragungen
+übersprungen, ein leeres Verzeichnis wird auf der Gegenseite angelegt.
+
 ## Authentifizierung
 ### Public Key
 Rust-Client:

@@ -178,6 +178,36 @@ For the release server, connect with:
 ssh3 max@my-server.example.org/ssh3-term -privkey ~/.ssh/id_ed25519
 ```
 
+### File transfer
+
+Stage 2 adds an `ssh3 -f` mode over a dedicated SFTP channel (the server
+serves `pkg/sftp` jailed to the session user's home directory; created
+files belong to that user):
+
+```bash
+# upload a file (remote operand last)
+ssh3 -f ~/report.pdf max@my-server.example.org/ssh3-term:docs/report.pdf
+
+# upload into an existing remote directory, recursively
+ssh3 -f -r ~/project-dir max@my-server.example.org/ssh3-term:backups/
+
+# download (remote operand first)
+ssh3 -f max@my-server.example.org/ssh3-term:logs/app.log ./app.log
+
+# resume interrupted transfers instead of overwriting
+ssh3 -f --continue big-disk-image.raw max@my-server.example.org/ssh3-term:images/raw
+
+# force SHA-256 verification by re-reading the remote file
+# (automatic for transfers over 32 MiB)
+ssh3 -f --checksum data.bin max@my-server.example.org/ssh3-term:data.bin
+```
+
+Notes: the port defaults to 443 and the URL path to `/ssh3-term`; override
+them with `-P` and `-U`, or spell the operand as
+`user@host:port/url_path:remote_path`. Non-regular files (symlinks, device
+nodes) are skipped during recursive transfers, and an empty directory is
+created on the other side.
+
 ## Authentication
 ### Public key
 Rust client:

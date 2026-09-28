@@ -178,6 +178,36 @@ ssh3 -privkey ~/.ssh/id_ed25519 username@my-domain.example.org/ssh3
 ssh3 max@my-server.example.org/ssh3-term -privkey ~/.ssh/id_ed25519
 ```
 
+### Передача файлов
+
+Stage 2 добавляет режим `ssh3 -f` поверх отдельного SFTP-канала (сервер
+отдаёт `pkg/sftp` с джейлом в домашнем каталоге сессионного пользователя;
+созданные файлы принадлежат этому пользователю):
+
+```bash
+# загрузка файла (remote-операнд последний)
+ssh3 -f ~/report.pdf max@my-server.example.org/ssh3-term:docs/report.pdf
+
+# загрузка каталога целиком, рекурсивно
+ssh3 -f -r ~/project-dir max@my-server.example.org/ssh3-term:backups/
+
+# скачивание (remote-операнд первый)
+ssh3 -f max@my-server.example.org/ssh3-term:logs/app.log ./app.log
+
+# докачка прерванных передач вместо перезаписи
+ssh3 -f --continue big-disk-image.raw max@my-server.example.org/ssh3-term:images/raw
+
+# форсировать проверку SHA-256 перечитыванием удалённого файла
+# (автоматически для передач больше 32 МиБ)
+ssh3 -f --checksum data.bin max@my-server.example.org/ssh3-term:data.bin
+```
+
+Примечания: порт по умолчанию 443, URL-путь — `/ssh3-term`; переопределяются
+флагами `-P` и `-U`, либо полной формой операнда
+`user@host:port/url_path:remote_path`. Нерегулярные файлы (симлинки,
+устройства) пропускаются при рекурсивной передаче, пустой каталог создаётся
+на противоположной стороне.
+
 ## Аутентификация
 ### Публичный ключ
 Rust-клиент:
