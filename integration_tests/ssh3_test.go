@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -346,6 +347,46 @@ var _ = Describe("Testing the ssh3 cli", func() {
 						Expect(sha256.Sum256(downloaded)).To(Equal(expectedHash))
 
 						Expect(exec.Command(ssh3Path, append(getClientArgs(rsaPrivKeyPath), "rm", "fx-upload.bin")...).Run()).To(Succeed())
+					})
+
+					It("Should transfer a directory tree recursively with matching checksums", func() {
+						workspace, err := os.MkdirTemp("", "ssh3-fx-tree-*")
+						Expect(err).ToNot(HaveOccurred())
+						defer os.RemoveAll(workspace)
+
+						tree := path.Join(workspace, "tree")
+						for _, dir := range []string{"", "sub", "sub/deep", "empty"} {
+							Expect(os.MkdirAll(path.Join(tree, dir), 0o755)).To(Succeed())
+						}
+						manifest := map[string][]byte{}
+						for _, file := range []struct{ relative string; size int }{
+							{relative: "top.bin", size: 1024},
+							{relative: "sub/mid.bin", size: 65536},
+							{relative: "sub/deep/deep.bin", size: 300},
+						} {
+							data := make([]byte, file.size)
+							_, err := rand.Read(data)
+							Expect(err).ToNot(HaveOccurred())
+							Expect(os.WriteFile(path.Join(tree, filepath.FromSlash(file.relative)), data, 0o644)).To(Succeed())
+							manifest[file.relative] = data
+						}
+
+						uploadCommand := exec.Command(ssh3Path, transferClientArgs(rsaPrivKeyPath, "-r", tree, transferSpec("fx-tree"))...)
+						uploadOutput, err := uploadCommand.CombinedOutput()
+						Expect(err).ToNot(HaveOccurred(), "recursive upload failed: %s", uploadOutput)
+
+						localMirror := path.Join(workspace, "mirror")
+						downloadCommand := exec.Command(ssh3Path, transferClientArgs(rsaPrivKeyPath, "-r", transferSpec("fx-tree"), localMirror)...)
+						downloadOutput, err := downloadCommand.CombinedOutput()
+						Expect(err).ToNot(HaveOccurred(), "recursive download failed: %s", downloadOutput)
+
+						for relative, data := range manifest {
+							mirrored, err := os.ReadFile(path.Join(localMirror, filepath.FromSlash(relative)))
+							Expect(err).ToNot(HaveOccurred(), "missing %s in mirror", relative)
+							Expect(mirrored).To(Equal(data), "content mismatch for %s", relative)
+						}
+						_, err = os.Stat(path.Join(localMirror, "empty"))
+						Expect(err).ToNot(HaveOccurred(), "empty directory was not transferred")
 					})
 				})
 
