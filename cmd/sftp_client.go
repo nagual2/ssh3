@@ -1,8 +1,6 @@
 // Copyright 2026 The nagual2 ssh3 Authors.
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !windows
-
 package cmd
 
 import (
@@ -121,6 +119,8 @@ func buildTransferURL(target transferTarget) *url.URL {
 }
 
 const checksumAutoThreshold = 32 * 1024 * 1024 // bytes; verify re-read kicks in automatically above it
+
+const sftpChannelType = "sftp"
 
 // runFileTransfer performs one upload or download over a dedicated "sftp"
 // channel of an already authenticated client.

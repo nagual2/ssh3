@@ -27,8 +27,6 @@ import (
 // every path is resolved inside the jail and every created inode is chowned
 // back to the user.
 
-const sftpChannelType = "sftp"
-
 // SFTP v3 open flags (private in pkg/sftp; SSH_FXF_* from the wire spec).
 const (
 	sftpFlagRead    = 0x00000001
