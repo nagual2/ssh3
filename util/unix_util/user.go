@@ -26,7 +26,13 @@ func GetUser(username string) (*User, error) {
 	return getUser(username)
 }
 
-func (u *User) CreateCommand(addEnv string, stdout, stderr io.Writer, stdin io.Reader, loginShell bool, command string, args ...string) (*exec.Cmd, io.Reader, io.Reader, io.Writer, error) {
+// CreateCommand wires the command's stdio. When stdout/stderr writers are
+// not supplied, the parent gets its own os.Pipe read ends; os/exec must NOT
+// own them (StdoutPipe's readers are closed by Wait and would race the
+// output pumps, truncating command output), so the write ends are returned
+// to the caller via closeParentStdio: it must be invoked right after Start,
+// otherwise the child never sees EOF on its stdout/stderr.
+func (u *User) CreateCommand(addEnv string, stdout, stderr io.Writer, stdin io.Reader, loginShell bool, command string, args ...string) (*exec.Cmd, io.Reader, io.Reader, io.Writer, func(), error) {
 	cmd := exec.Command(command, args...)
 	cmd.Env = append(cmd.Env, addEnv)
 	cmd.Dir = u.Dir
@@ -48,36 +54,53 @@ func (u *User) CreateCommand(addEnv string, stdout, stderr io.Writer, stdin io.R
 	var err error
 	var stdoutR, stderrR io.Reader
 	var stdinW io.Writer
+	var closeParentStdio func()
 
 	if stdout == nil {
-		stdoutR, err = cmd.StdoutPipe()
-		if err != nil {
-			return nil, nil, nil, nil, err
+		pipeR, pipeW, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			return nil, nil, nil, nil, nil, pipeErr
 		}
+		cmd.Stdout = pipeW
+		stdoutR = pipeR
+		closeParentStdio = appendCloser(closeParentStdio, pipeW)
 	} else {
 		cmd.Stdout = stdout
 	}
 	if stderr == nil {
-		stderrR, err = cmd.StderrPipe()
-		if err != nil {
-			return nil, nil, nil, nil, err
+		pipeR, pipeW, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			return nil, nil, nil, nil, nil, pipeErr
 		}
+		cmd.Stderr = pipeW
+		stderrR = pipeR
+		closeParentStdio = appendCloser(closeParentStdio, pipeW)
 	} else {
 		cmd.Stderr = stderr
 	}
 	if stdin == nil {
 		stdinW, err = cmd.StdinPipe()
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, err
 		}
 	} else {
 		cmd.Stdin = stdin
 	}
 
-	return cmd, stdoutR, stderrR, stdinW, err
+	return cmd, stdoutR, stderrR, stdinW, closeParentStdio, err
 }
 
-func (u *User) CreateCommandPipeOutput(addEnv string, loginShell bool, command string, args ...string) (*exec.Cmd, io.Reader, io.Reader, io.Writer, error) {
+func appendCloser(chain func(), closer io.Closer) func() {
+	if chain == nil {
+		return func() { _ = closer.Close() }
+	}
+	return func() {
+		chain()
+		_ = closer.Close()
+	}
+}
+
+func (u *User) CreateCommandPipeOutput(addEnv string, loginShell bool, command string, args ...string) (*exec.Cmd, io.Reader, io.Reader, io.Writer, func(), error) {
 	cmd := exec.Command(command, args...)
 
 	cmd.Env = append(cmd.Env, addEnv)

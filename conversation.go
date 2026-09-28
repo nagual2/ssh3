@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/francoismichel/ssh3/util"
 	"golang.org/x/exp/slices"
@@ -345,6 +346,24 @@ func (c *Conversation) AddDatagram(ctx context.Context, datagram []byte) error {
 func (c *Conversation) Close() {
 	c.controlStream.Close()
 	c.cancelContext(nil)
+}
+
+// DrainAndClose waits for the peer to finish reading in-flight stream data
+// and close the connection, then closes the conversation. A conversation
+// teardown drops whatever the transport has not packed and sent yet, so a
+// server finishing a session must give the peer time to consume the tail of
+// the streams (e.g. command output followed by the exit status) before the
+// forced close; the timeout only bounds a peer that never goes away.
+func (c *Conversation) DrainAndClose(drain time.Duration) {
+	if qconn, ok := c.streamCreator.(quic.Connection); ok {
+		select {
+		case <-qconn.Context().Done():
+			// the peer closed the connection: everything deliverable has been
+			// delivered, a forced close no longer destroys anything
+		case <-time.After(drain):
+		}
+	}
+	c.Close()
 }
 
 func (c *Conversation) Context() context.Context {

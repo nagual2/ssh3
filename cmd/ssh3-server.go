@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -351,8 +352,8 @@ func execCmdInBackground(channel ssh3.Channel, user *unix_util.User, session *ru
 
 		stdoutChan := make(chan readResult, 1)
 		stderrChan := make(chan readResult, 1)
-		execResultChan := make(chan error, 1)
 		execExitStatus := uint64(0)
+		var stdoutBytes atomic.Uint64
 
 		readStdout := func() {
 			defer close(stdoutChan)
@@ -387,10 +388,6 @@ func execCmdInBackground(channel ssh3.Channel, user *unix_util.User, session *ru
 
 		go readStdout()
 		go readStderr()
-		go func() {
-			execResultChan <- runningCommand.Wait()
-			close(execResultChan)
-		}()
 
 		for {
 			select {
@@ -406,6 +403,7 @@ func execCmdInBackground(channel ssh3.Channel, user *unix_util.User, session *ru
 						log.Error().Msgf("could not write the pty's output in an SSH message: %+v\n", err)
 						return
 					}
+					stdoutBytes.Add(uint64(len(buf))) // DIAGNOSTIC
 					if err != nil && !errors.Is(err, io.EOF) {
 						log.Info().Msgf("could not read the pty's output, it might have been closed by the running process: %s", err)
 					}
@@ -427,21 +425,19 @@ func execCmdInBackground(channel ssh3.Channel, user *unix_util.User, session *ru
 					}
 				}
 
-			case err, ok := <-execResultChan:
-				if !ok {
-					// disable the channel: a select on a nil is always blocking
-					execResultChan = nil
-				} else {
-					log.Debug().Msgf("command wait completed on channel %d with err=%v", channel.ChannelID(), err)
-					execExitStatus = uint64(0)
-					if err != nil {
-						if exitError, ok := err.(*exec.ExitError); ok {
-							execExitStatus = safeExitStatus(exitError.ExitCode())
-						}
+			}
+			if stdoutChan == nil && stderrChan == nil {
+				// All pipe readers have drained: only now is Wait safe. os/exec
+				// closes the pipe readers when Wait returns, so calling it
+				// earlier races the output pumps and truncates command output.
+				waitErr := runningCommand.Wait()
+				execExitStatus = uint64(0)
+				if waitErr != nil {
+					if exitError, ok := waitErr.(*exec.ExitError); ok {
+						execExitStatus = safeExitStatus(exitError.ExitCode())
 					}
 				}
-			}
-			if stdoutChan == nil && stderrChan == nil && execResultChan == nil {
+				fmt.Fprintf(os.Stderr, "DIAG_SERVED channel=%d bytes=%d\n", channel.ChannelID(), stdoutBytes.Load()) // DIAGNOSTIC
 				log.Debug().Msgf("sending exit-status %d on channel %d", execExitStatus, channel.ChannelID())
 				err := channel.SendRequest(&ssh3Messages.ChannelRequestMessage{
 					WantReply:      false,
@@ -520,6 +516,7 @@ func newCommand(user *unix_util.User, channel ssh3.Channel, loginShell bool, com
 
 	var stdoutR, stderrR, stdinR io.Reader
 	var stdoutW, stderrW, stdinW io.Writer
+	var closeParentPipes func()
 	var err error = nil
 	var cmd *exec.Cmd
 
@@ -531,7 +528,7 @@ func newCommand(user *unix_util.User, channel ssh3.Channel, loginShell bool, com
 		stdoutR = session.pty.pty
 		stderrR = nil
 		stdinW = session.pty.pty
-		cmd, _, _, _, err = user.CreateCommand(env, stdoutW, stderrW, stdinR, loginShell, command, args...)
+		cmd, _, _, _, closeParentPipes, err = user.CreateCommand(env, stdoutW, stderrW, stdinR, loginShell, command, args...)
 	} else {
 		stdoutR, stdoutW, err = os.Pipe()
 		if err != nil {
@@ -545,7 +542,7 @@ func newCommand(user *unix_util.User, channel ssh3.Channel, loginShell bool, com
 		if err != nil {
 			return err
 		}
-		cmd, stdoutR, stderrR, stdinW, err = user.CreateCommandPipeOutput(env, loginShell, command, args...)
+		cmd, stdoutR, stderrR, stdinW, closeParentPipes, err = user.CreateCommandPipeOutput(env, loginShell, command, args...)
 	}
 
 	if err != nil {
@@ -558,6 +555,12 @@ func newCommand(user *unix_util.User, channel ssh3.Channel, loginShell bool, com
 		stdoutR: stdoutR,
 		stderrR: stderrR,
 		stdinW:  stdinW,
+	}
+	// The parent's write ends would keep the child's stdout/stderr pipes from
+	// ever reaching EOF; hand the write ends to the child and drop ours.
+	// nil in the PTY branch (the child writes to the pty directly).
+	if closeParentPipes != nil {
+		defer closeParentPipes()
 	}
 
 	session.runningCmd = runningCommand
@@ -1057,8 +1060,11 @@ func ServerMain() int {
 					// LIFO order matters: the channel (with its buffered exit-status
 					// frame) must close with a FIN before the conversation teardown,
 					// otherwise the conversation close resets the stream and the
-					// client loses the exit status of fast-exiting commands
-					defer conv.Close()
+					// client loses the exit status of fast-exiting commands.
+					// DrainAndClose then keeps the conversation alive long enough
+					// for the peer to consume the tail of the stream data before
+					// the forced close.
+					defer conv.DrainAndClose(3 * time.Second)
 					defer channel.Close()
 					for {
 						genericMessage, err := channel.NextMessage()
