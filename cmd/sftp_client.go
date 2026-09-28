@@ -76,6 +76,12 @@ func parseRemoteTransferSpec(spec string, defaultPort int, defaultURLPath string
 	target.hostname = parts[0]
 	if len(parts) == 2 {
 		target.remotePath = parts[1]
+		// "user@host/url_path:remote" hybrid: a slash in the host part is the
+		// connection URL path (mirrors the plain client's URL form)
+		if slash := strings.Index(target.hostname, "/"); slash >= 0 {
+			target.urlPath = target.hostname[slash:]
+			target.hostname = target.hostname[:slash]
+		}
 	} else if len(parts) == 3 {
 		portPart, urlRest, found := strings.Cut(parts[1], "/")
 		if !digitsOnly(portPart) {

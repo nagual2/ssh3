@@ -54,4 +54,12 @@ func TestParseRemoteTransferSpec(t *testing.T) {
 	if port != 443 || urlPath != "/ssh3-term" {
 		t.Errorf("defaults not applied: %d %q", port, urlPath)
 	}
+
+	target, port, urlPath, err = parseRemoteTransferSpec("max@host/ssh3-term:remote.bin", 443, "/ssh3-term")
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if target.hostname != "host" || target.urlPath != "/ssh3-term" || target.remotePath != "remote.bin" {
+		t.Errorf("hybrid spec mismatch: %+v", target)
+	}
 }
