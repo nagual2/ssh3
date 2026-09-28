@@ -385,6 +385,9 @@ func ClientMain() int {
 	forwardUDP := flag.String("forward-udp", "", "if set, take a localport/remoteip@remoteport forwarding localhost@localport towards remoteip@remoteport")
 	forwardTCP := flag.String("forward-tcp", "", "if set, take a localport/remoteip@remoteport forwarding localhost@localport towards remoteip@remoteport")
 	proxyJump := flag.String("proxy-jump", "", "if set, performs a proxy jump using the specified remote host as proxy (requires server with version >= 0.1.5)")
+	fileTransfer := flag.Bool("f", false, "file transfer mode: ssh3 -f SRC DST, with exactly one operand in the user@host:remote_path form (uploads towards it) and the other one local (downloads from it)")
+	transferPort := flag.Int("P", 443, "file transfer mode: server port for the user@host:remote_path operand")
+	transferURLPath := flag.String("U", "/ssh3-term", "file transfer mode: server URL path for the user@host:remote_path operand")
 
 	var flagValues []*FlagValue
 	cliParsers, err := internal.GetPluginsCLIArgs()
@@ -461,11 +464,43 @@ func ClientMain() int {
 		}
 	}
 
+	fileTransferTarget := transferTarget{}
+	fileTransferLocal := ""
+	fileTransferUpload := false
 	urlFromParam := args[0]
-	if !strings.HasPrefix(urlFromParam, "https://") {
+	command := args[1:]
+
+	if *fileTransfer {
+		if len(args) != 2 {
+			fmt.Fprintln(os.Stderr, "file transfer mode expects exactly two operands: one user@host:remote_path and one local path")
+			return -1
+		}
+		switch {
+		case isRemoteTransferSpec(args[0]) && !isRemoteTransferSpec(args[1]):
+			// remote operand is the source: download to the local path
+			target, _, _, err := parseRemoteTransferSpec(args[0], *transferPort, *transferURLPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s\n", err)
+				return -1
+			}
+			fileTransferTarget, fileTransferLocal, fileTransferUpload = target, args[1], false
+		case isRemoteTransferSpec(args[1]) && !isRemoteTransferSpec(args[0]):
+			// remote operand is the destination: upload from the local path
+			target, _, _, err := parseRemoteTransferSpec(args[1], *transferPort, *transferURLPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s\n", err)
+				return -1
+			}
+			fileTransferTarget, fileTransferLocal, fileTransferUpload = target, args[0], true
+		default:
+			fmt.Fprintln(os.Stderr, "file transfer mode expects exactly one remote operand in the user@host:remote_path form")
+			return -1
+		}
+		urlFromParam = buildTransferURL(fileTransferTarget).String()
+		command = nil
+	} else if !strings.HasPrefix(urlFromParam, "https://") {
 		urlFromParam = fmt.Sprintf("https://%s", urlFromParam)
 	}
-	command := args[1:]
 
 	var localUDPAddr *net.UDPAddr = nil
 	var remoteUDPAddr *net.UDPAddr = nil
@@ -719,6 +754,10 @@ func ClientMain() int {
 			log.Error().Msgf("could not forward UDP: %s", err)
 			return -1
 		}
+	}
+
+	if *fileTransfer {
+		return runFileTransfer(c, fileTransferTarget, fileTransferLocal, fileTransferUpload, false)
 	}
 
 	err = c.RunSession(tty, *forwardSSHAgent, command...)

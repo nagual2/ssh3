@@ -304,6 +304,51 @@ var _ = Describe("Testing the ssh3 cli", func() {
 					Eventually(session).Should(Exit(0))
 				})
 
+				Context("File transfer", func() {
+					transferSpec := func(remoteFileName string) string {
+						// explicit port and url path: user@host:port/url_path:remote_path
+						return fmt.Sprintf("%s@%s%s:%s", username, serverBind, DEFAULT_URL_PATH, remoteFileName)
+					}
+					// getClientArgs cannot be reused here: it appends its own
+					// host operand, and the transfer client takes exactly the
+					// -f operands
+					transferClientArgs := func(privKeyPath string, operands ...string) []string {
+						args := []string{"-v", "-insecure", "-privkey", privKeyPath, "-f"}
+						return append(args, operands...)
+					}
+
+					It("Should upload and download a file with matching checksums", func() {
+						const payloadSize = 8 * 1024 * 1024
+						payload := make([]byte, payloadSize)
+						_, err := rand.Read(payload)
+						Expect(err).ToNot(HaveOccurred())
+						expectedHash := sha256.Sum256(payload)
+
+						workspace, err := os.MkdirTemp("", "ssh3-fx-*")
+						Expect(err).ToNot(HaveOccurred())
+						defer os.RemoveAll(workspace)
+
+						localUpload := path.Join(workspace, "upload.bin")
+						Expect(os.WriteFile(localUpload, payload, 0o644)).To(Succeed())
+
+						uploadCommand := exec.Command(ssh3Path, transferClientArgs(rsaPrivKeyPath, localUpload, transferSpec("fx-upload.bin"))...)
+						uploadOutput, err := uploadCommand.CombinedOutput()
+						Expect(err).ToNot(HaveOccurred(), "upload failed: %s", uploadOutput)
+
+						localDownload := path.Join(workspace, "download.bin")
+						downloadCommand := exec.Command(ssh3Path, transferClientArgs(rsaPrivKeyPath, transferSpec("fx-upload.bin"), localDownload)...)
+						downloadOutput, err := downloadCommand.CombinedOutput()
+						Expect(err).ToNot(HaveOccurred(), "download failed: %s", downloadOutput)
+
+						downloaded, err := os.ReadFile(localDownload)
+						Expect(err).ToNot(HaveOccurred())
+						Expect(downloaded).To(HaveLen(payloadSize))
+						Expect(sha256.Sum256(downloaded)).To(Equal(expectedHash))
+
+						Expect(exec.Command(ssh3Path, append(getClientArgs(rsaPrivKeyPath), "rm", "fx-upload.bin")...).Run()).To(Succeed())
+					})
+				})
+
 				// It checks that upon executing the client with the -forward-tcp,
 				// a TCP socket is indeed well open on the client and is indeed forwarded
 				// through the SSH3 connection towards the specified remote IP and port.

@@ -1038,6 +1038,13 @@ func ServerMain() int {
 				log.Debug().Msgf("accepted TCP forwarding channel %d to %s", channel.ChannelID(), c.RemoteAddr)
 				handleTCPForwardingChannel(conv.Context(), authenticatedUser, conv, c)
 			default:
+				if channel.ChannelType() == sftpChannelType {
+					log.Debug().Msgf("accepted sftp channel %d", channel.ChannelID())
+					// own goroutine, own lifetime: closing the transfer channel
+					// must not end the conversation the way a session does
+					go serveSFTPSubsystem(authenticatedUser, channel)
+					continue
+				}
 				log.Debug().Msgf("accepted session channel %d of type %q", channel.ChannelID(), channel.ChannelType())
 				runningSessions.Insert(channel, &runningSession{
 					channelState:   LARVAL,
