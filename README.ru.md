@@ -41,7 +41,7 @@ SSH3 переносит семантику удалённых сессий в д
 Установка deb-пакета:
 
 ```bash
-sudo dpkg -i ssh3_0.1.13_amd64.deb
+sudo dpkg -i ssh3_0.1.14_amd64.deb
 ```
 
 Сервис слушает UDP 443 по секретному URL-пути `/ssh3-term`. Конфигурация — в `/etc/ssh3/ssh3-server.env` (файл и уровень лога, `LANG`), юнит — в `/usr/lib/systemd/system/ssh3-server.service`, а self-signed сертификат ed25519 с IP/DNS SAN генерируется в `/etc/ssh3/` при установке, если его нет.
