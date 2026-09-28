@@ -674,7 +674,12 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 		}
 	}()
 
-	defer fmt.Printf("\r")
+	// A trailing carriage return restores the prompt position after an
+	// interactive PTY session; in exec mode stdout is data, not a terminal,
+	// so it must stay byte-exact (e.g. piping through sha256sum).
+	if ptyRequested {
+		defer fmt.Printf("\r")
+	}
 
 	for {
 		genericMessage, err := channel.NextMessage()
@@ -716,6 +721,34 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 					// forward a distinct local error instead of the remote's
 					// success status, which would mask the data loss
 					exitStatus = 255
+				}
+				// An exit status does not end the byte stream: command output
+				// may still be in flight, and the channel ends with a
+				// server-side EOF only. Keep reading until that EOF (or a
+				// connection error) so the output tail is not silently dropped.
+				for {
+					message, err := channel.NextMessage()
+					if err != nil || message == nil {
+						break
+					}
+					if data, ok := message.(*ssh3Messages.DataOrExtendedDataMessage); ok {
+						switch data.DataType {
+						case ssh3Messages.SSH_EXTENDED_DATA_NONE:
+							if _, err := os.Stdout.Write([]byte(data.Data)); err != nil {
+								log.Fatal().Msgf("%s", err)
+							}
+						case ssh3Messages.SSH_EXTENDED_DATA_STDERR:
+							if _, err := os.Stderr.Write([]byte(data.Data)); err != nil {
+								log.Fatal().Msgf("%s", err)
+							}
+						}
+						continue
+					}
+					if request, ok := message.(*ssh3Messages.ChannelRequestMessage); ok {
+						if laterStatus, ok := request.ChannelRequest.(*ssh3Messages.ExitStatusRequest); ok {
+							exitStatus = int(laterStatus.ExitStatus)
+						}
+					}
 				}
 				// forward the process' status code to the user
 				return ExitStatus{StatusCode: exitStatus}

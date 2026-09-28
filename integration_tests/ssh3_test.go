@@ -291,6 +291,30 @@ var _ = Describe("Testing the ssh3 cli", func() {
 					Expect(sha256.Sum256(remoteOut)).To(Equal(expectedHash))
 				})
 
+				It("Should transfer large exec output byte-exact", func() {
+					// regression: exec stdout used to lose its tail when the
+					// server tore the conversation down before the pipe drain
+					// finished, and used to carry a stray trailing CR
+					const payloadSize = 8 * 1024 * 1024
+					payload := make([]byte, payloadSize)
+					_, err := rand.Read(payload)
+					Expect(err).ToNot(HaveOccurred())
+					expectedHash := sha256.Sum256(payload)
+
+					// /tmp is readable and writable for both the suite and the
+					// server process regardless of the session user's home
+					remoteFile := path.Join("/tmp", fmt.Sprintf("fx-exec-out-%d.bin", os.Getpid()))
+					Expect(os.WriteFile(remoteFile, payload, 0o644)).To(Succeed())
+					defer os.Remove(remoteFile)
+
+					clientArgs = append(getClientArgs(rsaPrivKeyPath), "cat", remoteFile)
+					command := exec.Command(ssh3Path, clientArgs...)
+					output, err := command.Output()
+					Expect(err).ToNot(HaveOccurred())
+					Expect(output).To(HaveLen(payloadSize))
+					Expect(sha256.Sum256(output)).To(Equal(expectedHash))
+				})
+
 				It("Should run the interactive shell in login mode and read .profile", func() {
 					clientArgs = getClientArgs(rsaPrivKeyPath)
 					command := exec.Command(ssh3Path, clientArgs...)
