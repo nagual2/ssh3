@@ -641,8 +641,13 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 	// remote command stopped consuming input early and the transfer was
 	// truncated (CTO task stage 1, bug 3).
 	var inputSent atomic.Bool
+	// closed on every return path of the stdin pump: an exit status that
+	// arrives while the pump is still running waits for it before deciding
+	// whether the transfer was truncated
+	pumpDone := make(chan struct{})
 
 	go func() {
+		defer close(pumpDone)
 		buf := make([]byte, channel.MaxPacketSize())
 		for {
 			n, err := os.Stdin.Read(buf)
@@ -698,9 +703,13 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 				log.Info().Msgf("ssh3: process exited with status: %d\n", requestMessage.ExitStatus)
 				exitStatus := int(requestMessage.ExitStatus)
 				if !ptyRequested && !inputSent.Load() {
-					// short grace for the stdin pump: its final EOF read races
-					// with a fast remote exit on an exact-size input
-					time.Sleep(100 * time.Millisecond)
+					// the stdin pump's final EOF read races with a fast remote
+					// exit: wait for the pump itself instead of a fixed grace,
+					// then re-check whether all input really made it out
+					select {
+					case <-pumpDone:
+					case <-time.After(2 * time.Second):
+					}
 				}
 				if !ptyRequested && !inputSent.Load() {
 					fmt.Fprintf(os.Stderr, "ssh3: remote command exited before all input was sent; the transfer was truncated\n")
