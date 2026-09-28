@@ -359,7 +359,10 @@ var _ = Describe("Testing the ssh3 cli", func() {
 							Expect(os.MkdirAll(path.Join(tree, dir), 0o755)).To(Succeed())
 						}
 						manifest := map[string][]byte{}
-						for _, file := range []struct{ relative string; size int }{
+						for _, file := range []struct {
+							relative string
+							size     int
+						}{
 							{relative: "top.bin", size: 1024},
 							{relative: "sub/mid.bin", size: 65536},
 							{relative: "sub/deep/deep.bin", size: 300},
