@@ -389,6 +389,8 @@ func ClientMain() int {
 	transferPort := flag.Int("P", 443, "file transfer mode: server port for the user@host:remote_path operand")
 	transferURLPath := flag.String("U", "/ssh3-term", "file transfer mode: server URL path for the user@host:remote_path operand")
 	recursive := flag.Bool("r", false, "file transfer mode: transfer directories recursively")
+	resumeMode := flag.Bool("continue", false, "file transfer mode: resume interrupted transfers instead of overwriting")
+	verifyChecksum := flag.Bool("checksum", false, "file transfer mode: verify the transfer with a SHA-256 re-read (automatic for files over 32 MiB)")
 
 	var flagValues []*FlagValue
 	cliParsers, err := internal.GetPluginsCLIArgs()
@@ -758,7 +760,7 @@ func ClientMain() int {
 	}
 
 	if *fileTransfer {
-		return runFileTransfer(c, fileTransferTarget, fileTransferLocal, fileTransferUpload, *recursive)
+		return runFileTransfer(c, fileTransferTarget, fileTransferLocal, fileTransferUpload, *recursive, *resumeMode, *verifyChecksum)
 	}
 
 	err = c.RunSession(tty, *forwardSSHAgent, command...)

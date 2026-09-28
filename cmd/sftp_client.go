@@ -6,7 +6,10 @@
 package cmd
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"net/url"
@@ -117,9 +120,11 @@ func buildTransferURL(target transferTarget) *url.URL {
 	}
 }
 
+const checksumAutoThreshold = 32 * 1024 * 1024 // bytes; verify re-read kicks in automatically above it
+
 // runFileTransfer performs one upload or download over a dedicated "sftp"
 // channel of an already authenticated client.
-func runFileTransfer(client *client.Client, target transferTarget, localPath string, upload bool, recursive bool) int {
+func runFileTransfer(client *client.Client, target transferTarget, localPath string, upload bool, recursive bool, resumeMode bool, verifyChecksum bool) int {
 	channel, err := client.OpenChannel(sftpChannelType, 30000, 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "could not open sftp channel: %+v\n", err)
@@ -141,14 +146,14 @@ func runFileTransfer(client *client.Client, target transferTarget, localPath str
 	remotePath := target.remotePath
 	if upload {
 		if recursive {
-			return uploadDir(sftpClient, localPath, remotePath)
+			return uploadDir(sftpClient, localPath, remotePath, resumeMode, verifyChecksum)
 		}
-		return uploadFile(sftpClient, localPath, remotePath)
+		return uploadFile(sftpClient, localPath, remotePath, resumeMode, verifyChecksum)
 	}
 	if recursive {
-		return downloadDir(sftpClient, remotePath, localPath)
+		return downloadDir(sftpClient, remotePath, localPath, resumeMode, verifyChecksum)
 	}
-	return downloadFile(sftpClient, remotePath, localPath)
+	return downloadFile(sftpClient, remotePath, localPath, resumeMode, verifyChecksum)
 }
 
 // sftpMkdirAll creates remote directories level by level (pkg/sftp Mkdir is
@@ -171,7 +176,7 @@ func sftpMkdirAll(sftpClient *sftp.Client, remoteDir string) error {
 	return nil
 }
 
-func uploadDir(sftpClient *sftp.Client, localRoot, remoteRoot string) int {
+func uploadDir(sftpClient *sftp.Client, localRoot, remoteRoot string, resumeMode, verifyChecksum bool) int {
 	info, err := os.Stat(localRoot)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot stat %s: %s\n", localRoot, err)
@@ -209,7 +214,7 @@ func uploadDir(sftpClient *sftp.Client, localRoot, remoteRoot string) int {
 			return nil
 		}
 		progress.rename(path.Base(current))
-		if code := uploadFile(sftpClient, current, remotePath); code != 0 {
+		if code := uploadFile(sftpClient, current, remotePath, resumeMode, verifyChecksum); code != 0 {
 			failures++
 		}
 		return nil
@@ -226,7 +231,7 @@ func uploadDir(sftpClient *sftp.Client, localRoot, remoteRoot string) int {
 	return 0
 }
 
-func downloadDir(sftpClient *sftp.Client, remoteRoot, localRoot string) int {
+func downloadDir(sftpClient *sftp.Client, remoteRoot, localRoot string, resumeMode, verifyChecksum bool) int {
 	remoteInfo, err := sftpClient.Stat(remoteRoot)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot stat remote %s: %s\n", remoteRoot, err)
@@ -265,7 +270,7 @@ func downloadDir(sftpClient *sftp.Client, remoteRoot, localRoot string) int {
 			continue
 		}
 		progress.rename(filepath.Base(localPath))
-		if code := downloadFileTo(sftpClient, walker.Path(), localPath); code != 0 {
+		if code := downloadFileTo(sftpClient, walker.Path(), localPath, resumeMode, verifyChecksum); code != 0 {
 			failures++
 		}
 	}
@@ -279,7 +284,7 @@ func downloadDir(sftpClient *sftp.Client, remoteRoot, localRoot string) int {
 
 // downloadFileTo downloads a remote file into an exact local path (no
 // directory-guessing), used by recursive downloads.
-func downloadFileTo(sftpClient *sftp.Client, remotePath, localPath string) int {
+func downloadFileTo(sftpClient *sftp.Client, remotePath, localPath string, resumeMode, verifyChecksum bool) int {
 	remoteFile, err := sftpClient.Open(remotePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot open remote file %s: %s\n", remotePath, err)
@@ -293,23 +298,75 @@ func downloadFileTo(sftpClient *sftp.Client, remotePath, localPath string) int {
 		return -1
 	}
 
-	localFile, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	openFlags := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	var startOffset int64
+	if resumeMode {
+		if localInfo, err := os.Stat(localPath); err == nil {
+			switch {
+			case localInfo.Size() > info.Size():
+				fmt.Fprintf(os.Stderr, "local %s is larger than remote (%d > %d bytes); remove it or drop --continue\n",
+					localPath, localInfo.Size(), info.Size())
+				return -1
+			case localInfo.Size() == info.Size():
+				fmt.Fprintf(os.Stderr, "%s is already fully downloaded, skipping\n", localPath)
+				return 0
+			default:
+				startOffset = localInfo.Size()
+				openFlags = os.O_WRONLY
+			}
+		}
+	}
+
+	localFile, err := os.OpenFile(localPath, openFlags, 0o644)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot create %s: %s\n", localPath, err)
 		return -1
 	}
 	defer localFile.Close()
 
-	progress := newTransferProgress("download", path.Base(remotePath), info.Size())
-	if _, err := io.Copy(localFile, progress.wrapReader(remoteFile)); err != nil {
+	localHasher := sha256.New()
+	if startOffset > 0 {
+		if prefixFile, err := os.Open(localPath); err == nil {
+			io.Copy(localHasher, io.NewSectionReader(prefixFile, 0, startOffset))
+			prefixFile.Close()
+		}
+	}
+
+	progress := newTransferProgress("download", path.Base(remotePath), info.Size()-startOffset)
+	if _, err := io.Copy(io.MultiWriter(localFile, localHasher), progress.wrapReader(remoteFile)); err != nil {
 		fmt.Fprintf(os.Stderr, "download failed: %s\n", err)
 		return -1
 	}
 	progress.finish()
+
+	if verifyChecksum || info.Size() > checksumAutoThreshold {
+		if !verifyRemoteChecksum(sftpClient, remotePath, localHasher) {
+			fmt.Fprintf(os.Stderr, "checksum mismatch after download of %s\n", remotePath)
+			return -1
+		}
+		fmt.Fprintf(os.Stderr, "[ssh3 -f] checksum ok: %s\n", remotePath)
+	}
 	return 0
 }
 
-func uploadFile(sftpClient *sftp.Client, localPath, remotePath string) int {
+// verifyRemoteChecksum re-reads the remote file end to end and compares its
+// SHA-256 with the local one; returns true when they match.
+func verifyRemoteChecksum(sftpClient *sftp.Client, remotePath string, localHasher hash.Hash) bool {
+	remoteHasher := sha256.New()
+	remoteFile, err := sftpClient.Open(remotePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "checksum verification failed: %s\n", err)
+		return false
+	}
+	defer remoteFile.Close()
+	if _, err := io.Copy(remoteHasher, remoteFile); err != nil {
+		fmt.Fprintf(os.Stderr, "checksum verification failed: %s\n", err)
+		return false
+	}
+	return bytes.Equal(localHasher.Sum(nil), remoteHasher.Sum(nil))
+}
+
+func uploadFile(sftpClient *sftp.Client, localPath, remotePath string, resumeMode, verifyChecksum bool) int {
 	info, err := os.Stat(localPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot stat %s: %s\n", localPath, err)
@@ -324,6 +381,26 @@ func uploadFile(sftpClient *sftp.Client, localPath, remotePath string) int {
 	if info, err := sftpClient.Stat(remotePath); err == nil && info.IsDir() {
 		remotePath = path.Join(remotePath, path.Base(localPath))
 	}
+
+	openFlags := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	var startOffset int64
+	if resumeMode {
+		if remoteInfo, err := sftpClient.Stat(remotePath); err == nil {
+			switch {
+			case remoteInfo.Size() > info.Size():
+				fmt.Fprintf(os.Stderr, "remote %s is larger than local (%d > %d bytes); remove it or drop --continue\n",
+					remotePath, remoteInfo.Size(), info.Size())
+				return -1
+			case remoteInfo.Size() == info.Size():
+				fmt.Fprintf(os.Stderr, "%s is already fully uploaded, skipping\n", remotePath)
+				return 0
+			default:
+				startOffset = remoteInfo.Size()
+				openFlags = os.O_WRONLY // append via absolute writes from startOffset
+			}
+		}
+	}
+
 	localFile, err := os.Open(localPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot open %s: %s\n", localPath, err)
@@ -331,15 +408,27 @@ func uploadFile(sftpClient *sftp.Client, localPath, remotePath string) int {
 	}
 	defer localFile.Close()
 
-	remoteFile, err := sftpClient.OpenFile(remotePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	remoteFile, err := sftpClient.OpenFile(remotePath, openFlags)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot create remote file %s: %s\n", remotePath, err)
 		return -1
 	}
 	defer remoteFile.Close()
 
-	progress := newTransferProgress("upload", localPath, info.Size())
-	if _, err := io.Copy(remoteFile, progress.wrapReader(localFile)); err != nil {
+	localHasher := sha256.New()
+	var reader io.Reader = localFile
+	if startOffset > 0 {
+		if _, err := localFile.Seek(startOffset, io.SeekStart); err != nil {
+			fmt.Fprintf(os.Stderr, "cannot resume %s: %s\n", localPath, err)
+			return -1
+		}
+		reader = io.NewSectionReader(localFile, startOffset, info.Size()-startOffset)
+		hashResumePrefix(sftpClient, remotePath, startOffset, localHasher)
+	}
+
+	progress := newTransferProgress("upload", localPath, info.Size()-startOffset)
+	_, err = copyWithOffset(remoteFile, reader, progress.addBytes, localHasher, startOffset)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "upload failed: %s\n", err)
 		return -1
 	}
@@ -354,10 +443,58 @@ func uploadFile(sftpClient *sftp.Client, localPath, remotePath string) int {
 		fmt.Fprintf(os.Stderr, "size mismatch after upload: local %d bytes, remote %d bytes\n", info.Size(), remoteInfo.Size())
 		return -1
 	}
+	if verifyChecksum || info.Size() > checksumAutoThreshold {
+		if !verifyRemoteChecksum(sftpClient, remotePath, localHasher) {
+			fmt.Fprintf(os.Stderr, "checksum mismatch after upload of %s\n", remotePath)
+			return -1
+		}
+		fmt.Fprintf(os.Stderr, "[ssh3 -f] checksum ok: %s\n", remotePath)
+	}
 	return 0
 }
 
-func downloadFile(sftpClient *sftp.Client, remotePath, localPath string) int {
+// copyWithOffset streams src into an absolute-offset writer (pkg/sftp files
+// write at explicit offsets, so resumable uploads append from startOffset),
+// feeding progress and the running hash.
+func copyWithOffset(dest io.WriterAt, src io.Reader, onBytes func(int64), hasher io.Writer, startOffset int64) (int64, error) {
+	buf := make([]byte, 32*1024)
+	var written int64
+	for {
+		n, readErr := src.Read(buf)
+		if n > 0 {
+			if _, writeErr := dest.WriteAt(buf[:n], startOffset+written); writeErr != nil {
+				return written, writeErr
+			}
+			written += int64(n)
+			if onBytes != nil {
+				onBytes(int64(n))
+			}
+			if hasher != nil {
+				hasher.Write(buf[:n])
+			}
+		}
+		if readErr == io.EOF {
+			return written, nil
+		}
+		if readErr != nil {
+			return written, readErr
+		}
+	}
+}
+
+// hashResumePrefix folds the already-transferred prefix into the local hash
+// so a resumed upload's final checksum covers the whole file.
+func hashResumePrefix(sftpClient *sftp.Client, remotePath string, length int64, hasher io.Writer) {
+	remoteFile, err := sftpClient.Open(remotePath)
+	if err != nil {
+		return
+	}
+	defer remoteFile.Close()
+	limited := io.NewSectionReader(remoteFile, 0, length)
+	io.Copy(hasher, limited)
+}
+
+func downloadFile(sftpClient *sftp.Client, remotePath, localPath string, resumeMode, verifyChecksum bool) int {
 	remoteInfo, err := sftpClient.Stat(remotePath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot stat remote %s: %s\n", remotePath, err)
@@ -370,7 +507,7 @@ func downloadFile(sftpClient *sftp.Client, remotePath, localPath string) int {
 	if info, err := os.Stat(localPath); err == nil && info.IsDir() {
 		localPath = filepath.Join(localPath, path.Base(remotePath))
 	}
-	return downloadFileTo(sftpClient, remotePath, localPath)
+	return downloadFileTo(sftpClient, remotePath, localPath, resumeMode, verifyChecksum)
 }
 
 // transferProgress reports byte counts on stderr every 500ms and a final

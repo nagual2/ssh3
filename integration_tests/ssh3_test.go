@@ -388,6 +388,56 @@ var _ = Describe("Testing the ssh3 cli", func() {
 						_, err = os.Stat(path.Join(localMirror, "empty"))
 						Expect(err).ToNot(HaveOccurred(), "empty directory was not transferred")
 					})
+
+					It("Should resume an interrupted upload with --continue", func() {
+						const payloadSize = 8 * 1024 * 1024
+						payload := make([]byte, payloadSize)
+						_, err := rand.Read(payload)
+						Expect(err).ToNot(HaveOccurred())
+						expectedHash := sha256.Sum256(payload)
+
+						workspace, err := os.MkdirTemp("", "ssh3-fx-resume-*")
+						Expect(err).ToNot(HaveOccurred())
+						defer os.RemoveAll(workspace)
+
+						fullFile := path.Join(workspace, "full.bin")
+						Expect(os.WriteFile(fullFile, payload, 0o644)).To(Succeed())
+						partialFile := path.Join(workspace, "partial.bin")
+						Expect(os.WriteFile(partialFile, payload[:payloadSize/2], 0o644)).To(Succeed())
+
+						// simulate an interrupted transfer: the first half is remote
+						partialCommand := exec.Command(ssh3Path, transferClientArgs(rsaPrivKeyPath, partialFile, transferSpec("fx-continue.bin"))...)
+						_, err = partialCommand.CombinedOutput()
+						Expect(err).ToNot(HaveOccurred())
+
+						resumeCommand := exec.Command(ssh3Path, transferClientArgs(rsaPrivKeyPath, "--continue", fullFile, transferSpec("fx-continue.bin"))...)
+						resumeOutput, err := resumeCommand.CombinedOutput()
+						Expect(err).ToNot(HaveOccurred(), "resume failed: %s", resumeOutput)
+
+						backFile := path.Join(workspace, "back.bin")
+						_, err = exec.Command(ssh3Path, transferClientArgs(rsaPrivKeyPath, transferSpec("fx-continue.bin"), backFile)...).CombinedOutput()
+						Expect(err).ToNot(HaveOccurred())
+						downloadedFile, err := os.ReadFile(backFile)
+						Expect(err).ToNot(HaveOccurred())
+						Expect(downloadedFile).To(HaveLen(payloadSize))
+						Expect(sha256.Sum256(downloadedFile)).To(Equal(expectedHash))
+					})
+
+					It("Should pass checksum verification on upload", func() {
+						workspace, err := os.MkdirTemp("", "ssh3-fx-sum-*")
+						Expect(err).ToNot(HaveOccurred())
+						defer os.RemoveAll(workspace)
+
+						checksummed := path.Join(workspace, "checksummed.bin")
+						data := make([]byte, 1024*1024)
+						_, err = rand.Read(data)
+						Expect(err).ToNot(HaveOccurred())
+						Expect(os.WriteFile(checksummed, data, 0o644)).To(Succeed())
+
+						command := exec.Command(ssh3Path, transferClientArgs(rsaPrivKeyPath, "--checksum", checksummed, transferSpec("fx-checksummed.bin"))...)
+						output, err := command.CombinedOutput()
+						Expect(err).ToNot(HaveOccurred(), "checksummed upload failed: %s", output)
+					})
 				})
 
 				// It checks that upon executing the client with the -forward-tcp,
