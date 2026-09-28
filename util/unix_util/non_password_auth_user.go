@@ -81,11 +81,19 @@ func getUser(username string) (*User, error) {
 		return nil, err
 	}
 
+	homeDir := u.HomeDir
+	// Deployment-time override: lets an operator (or a test harness) relocate
+	// the identity files of a user without touching /etc/passwd, e.g. to point
+	// a containerized server at a mounted home directory.
+	if envHome := os.Getenv("SSH3_USER_HOME"); envHome != "" {
+		homeDir = envHome
+	}
+
 	return &User{
 		Username: u.Username,
 		Uid:      uid,
 		Gid:      gid,
-		Dir:      u.HomeDir,
+		Dir:      homeDir,
 		Shell:    userShell(u.Username),
 	}, nil
 }

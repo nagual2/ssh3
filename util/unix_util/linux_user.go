@@ -19,6 +19,7 @@ int get_errno() { return errno; }
 import "C"
 import (
 	"fmt"
+	"os"
 	"syscall"
 	"unsafe"
 
@@ -163,6 +164,13 @@ func getpwnam(name string) (*User, error) {
 		Gid:      uint64(cpasswd.pw_gid),
 		Dir:      C.GoString(cpasswd.pw_dir),
 		Shell:    C.GoString(cpasswd.pw_shell),
+	}
+
+	// Deployment-time override: lets an operator (or a test harness) relocate
+	// the identity files of a user without touching /etc/passwd, e.g. to point
+	// a containerized server at a mounted home directory.
+	if home := os.Getenv("SSH3_USER_HOME"); home != "" {
+		s.Dir = home
 	}
 
 	return &s, nil
