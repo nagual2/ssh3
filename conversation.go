@@ -31,7 +31,7 @@ type Conversation struct {
 	controlStream             http3.Stream
 	maxPacketSize             uint64
 	defaultDatagramsQueueSize uint64
-	streamCreator             http3.StreamCreator
+	streamCreator             streamOpener
 	messageSender             util.DatagramSender
 	channelsManager           *channelsManager
 	context                   context.Context
@@ -77,9 +77,9 @@ func NewClientConversation(maxPacketsize uint64, defaultDatagramsQueueSize uint6
 	return conv, nil
 }
 
-func (c *Conversation) EstablishClientConversation(req *http.Request, roundTripper *http3.RoundTripper, supportedVersions []Version) error {
+func (c *Conversation) EstablishClientConversation(req *http.Request, qconn quic.Connection, roundTripper *http3.RoundTripper, supportedVersions []Version) error {
 
-	roundTripper.StreamHijacker = func(frameType http3.FrameType, qconn quic.Connection, stream quic.Stream, err error) (bool, error) {
+	roundTripper.StreamHijacker = func(frameType http3.FrameType, _ quic.ConnectionTracingID, stream quic.Stream, err error) (bool, error) {
 		if err != nil {
 			return false, err
 		}
@@ -113,12 +113,25 @@ func (c *Conversation) EstablishClientConversation(req *http.Request, roundTripp
 		return true, nil
 	}
 
-	doReq := func(version Version, req *http.Request) (*http.Response, Version, error) {
+	// the StreamHijacker above is picked up when the client conn is created
+	cc := roundTripper.NewClientConn(qconn)
+
+	doReq := func(version Version, req *http.Request) (*http.Response, http3.Stream, Version, error) {
 		req.Header.Set("User-Agent", version.GetVersionString())
 		log.Debug().Msgf("send %s request on URL %s, User-Agent=\"%s\"", req.Method, req.URL, req.Header.Get("User-Agent"))
-		rsp, err := roundTripper.RoundTripOpt(req, http3.RoundTripOpt{DontCloseRequestStream: true})
+		// the v0.49 http3 client API: the extended-CONNECT stream is opened
+		// explicitly and stays open, so it can serve as the conversation's
+		// control stream
+		rs, err := cc.OpenRequestStream(c.Context())
 		if err != nil {
-			return rsp, Version{}, err
+			return nil, nil, Version{}, err
+		}
+		if err := rs.SendRequestHeader(req); err != nil {
+			return nil, nil, Version{}, err
+		}
+		rsp, err := rs.ReadResponse()
+		if err != nil {
+			return nil, nil, Version{}, err
 		}
 
 		log.Debug().Msgf("got response with %s status code", rsp.Status)
@@ -128,16 +141,16 @@ func (c *Conversation) EstablishClientConversation(req *http.Request, roundTripp
 		if err != nil {
 			log.Error().Msgf("Could not parse server version: \"%s\"", serverVersionStr)
 			if rsp.StatusCode == 200 {
-				return rsp, Version{}, InvalidSSHVersion{versionString: serverVersionStr}
+				return rsp, rs, Version{}, InvalidSSHVersion{versionString: serverVersionStr}
 			}
 		} else {
 			log.Debug().Msgf("server has valid version \"%s\" (protocol version = %s, software version = %s)",
 				serverVersionStr, serverVersion.GetProtocolVersion(), serverVersion.GetSoftwareVersion())
 		}
-		return rsp, serverVersion, nil
+		return rsp, rs, serverVersion, nil
 	}
 
-	rsp, serverVersion, err := doReq(ThisVersion(), req)
+	rsp, controlStream, serverVersion, err := doReq(ThisVersion(), req)
 	if err != nil {
 		return err
 	}
@@ -167,7 +180,7 @@ func (c *Conversation) EstablishClientConversation(req *http.Request, roundTripp
 				"you may want to update the server version before support is removed. Also, note that connecting to old "+
 				"servers may increase the connection establishment time.", serverVersion.GetVersionString())
 			// now retry the request with the compatible version
-			rsp, serverVersion, err = doReq(supportedVersions[matchingVersionIndex], req)
+			rsp, controlStream, serverVersion, err = doReq(supportedVersions[matchingVersionIndex], req)
 			if err != nil {
 				return err
 			}
@@ -179,9 +192,10 @@ func (c *Conversation) EstablishClientConversation(req *http.Request, roundTripp
 			log.Warn().Msgf("The server runs an unsupported SSH version (%s), you may want to consider to update the client (currently %s)",
 				serverVersion.GetProtocolVersion(), ThisVersion().GetProtocolVersion())
 		}
-		c.controlStream = rsp.Body.(http3.HTTPStreamer).HTTPStream()
-		c.streamCreator = rsp.Body.(http3.Hijacker).StreamCreator()
-		qconn := c.streamCreator.(quic.Connection)
+		c.controlStream = controlStream
+		// quic.Connection satisfies the streamOpener facade and provides the
+		// quic-level datagram API the loop below needs
+		c.streamCreator = qconn
 		c.messageSender = qconn
 		c.context, c.cancelContext = context.WithCancelCause(qconn.Context())
 		go func() {
@@ -232,7 +246,7 @@ func (c *Conversation) EstablishClientConversation(req *http.Request, roundTripp
 	}
 }
 
-func NewServerConversation(ctx context.Context, controlStream http3.Stream, qconn quic.Connection, messageSender util.DatagramSender, maxPacketsize uint64, peerVersion Version) (*Conversation, error) {
+func NewServerConversation(ctx context.Context, controlStream http3.Stream, qconn http3.Connection, messageSender util.DatagramSender, maxPacketsize uint64, peerVersion Version) (*Conversation, error) {
 	backgroundContext, backgroundCancelFunc := context.WithCancelCause(ctx)
 
 	tls := qconn.ConnectionState().TLS
@@ -258,7 +272,22 @@ func NewServerConversation(ctx context.Context, controlStream http3.Stream, qcon
 }
 
 type StreamByteReader struct {
-	http3.Stream
+	quic.Stream
+}
+
+// rawQUICConn is the quic-level connection behind the http3.Connection facade:
+// ssh3 needs its datagram and context methods, which the facade does not expose.
+type rawQUICConn interface {
+	ReceiveDatagram(ctx context.Context) ([]byte, error)
+	SendDatagram(b []byte) error
+	Context() context.Context
+}
+
+// streamOpener is the slice of the connection the Conversation needs to open
+// new channels: both quic.Connection (client) and http3.Connection (server)
+// satisfy it.
+type streamOpener interface {
+	OpenStream() (quic.Stream, error)
 }
 
 func (r *StreamByteReader) ReadByte() (byte, error) {

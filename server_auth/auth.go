@@ -44,16 +44,16 @@ func HandleAuths(ctx context.Context, enablePasswordLogin bool, defaultMaxPacket
 			return
 		}
 
-		streamCreator := hijacker.StreamCreator()
-		qconn := streamCreator.(quic.Connection)
+		conn := hijacker.Connection()
+		qconn := conn.(quic.Connection)
 		if !qconn.ConnectionState().TLS.HandshakeComplete {
 			// do not process early data (0-RTT) when performing authorization
 			// to avoid replay attacks
 			w.WriteHeader(http.StatusTooEarly)
 			return
 		}
-		str := r.Body.(http3.HTTPStreamer).HTTPStream()
-		conv, err := ssh3.NewServerConversation(ctx, str, qconn, qconn, defaultMaxPacketSize, peerVersion)
+		str := w.(http3.HTTPStreamer).HTTPStream()
+		conv, err := ssh3.NewServerConversation(ctx, str, conn, qconn, defaultMaxPacketSize, peerVersion)
 		if err != nil {
 			log.Error().Msgf("could not create new server conversation")
 			w.WriteHeader(http.StatusInternalServerError)

@@ -70,7 +70,7 @@ func run() int {
 	}
 	server := http3.Server{
 		EnableDatagrams: true,
-		QuicConfig: &quic.Config{
+		QUICConfig: &quic.Config{
 			Allow0RTT: true,
 		},
 		TLSConfig: http3.ConfigureTLSConfig(baseTLSConfig),
@@ -104,7 +104,7 @@ func run() int {
 			return
 		}
 
-		streamCreator := hijacker.StreamCreator()
+		streamCreator := hijacker.Connection()
 		qconn := streamCreator.(quic.Connection)
 		if !qconn.ConnectionState().TLS.HandshakeComplete {
 			fmt.Fprintln(os.Stderr, "unauthorized: TLS handshake incomplete")
@@ -120,7 +120,7 @@ func run() int {
 		conv, err := ssh3.NewServerConversation(
 			context.Background(),
 			streamer.HTTPStream(),
-			qconn,
+			streamCreator,
 			qconn,
 			30_000,
 			peerVersion,

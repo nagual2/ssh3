@@ -10,12 +10,12 @@ import (
 type ControlStreamID = uint64
 
 type conversationsManager struct {
-	connection    http3.StreamCreator
+	connection    http3.Connection
 	conversations map[ControlStreamID]*Conversation
 	lock          sync.Mutex
 }
 
-func newConversationManager(connection http3.StreamCreator) *conversationsManager {
+func newConversationManager(connection http3.Connection) *conversationsManager {
 	return &conversationsManager{connection: connection, conversations: make(map[ControlStreamID]*Conversation)}
 }
 

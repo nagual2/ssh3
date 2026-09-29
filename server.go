@@ -21,7 +21,7 @@ type ServerConversationHandler func(authenticatedUsername string, conversation *
 type Server struct {
 	maxPacketSize       uint64
 	h3Server            *http3.Server
-	conversations       map[http3.StreamCreator]*conversationsManager
+	conversations       map[quic.ConnectionTracingID]*conversationsManager
 	conversationHandler ServerConversationHandler
 	lock                sync.Mutex
 	// conversations map[]
@@ -33,11 +33,11 @@ func NewServer(maxPacketSize uint64, defaultDatagramQueueSize uint64, h3Server *
 	ssh3Server := &Server{
 		maxPacketSize:       maxPacketSize,
 		h3Server:            h3Server,
-		conversations:       make(map[http3.StreamCreator]*conversationsManager),
+		conversations:       make(map[quic.ConnectionTracingID]*conversationsManager),
 		conversationHandler: conversationHandler,
 	}
 
-	h3Server.StreamHijacker = func(frameType http3.FrameType, qconn quic.Connection, stream quic.Stream, err error) (bool, error) {
+	h3Server.StreamHijacker = func(frameType http3.FrameType, id quic.ConnectionTracingID, stream quic.Stream, err error) (bool, error) {
 		if err != nil {
 			return false, err
 		}
@@ -46,9 +46,9 @@ func NewServer(maxPacketSize uint64, defaultDatagramQueueSize uint64, h3Server *
 			return false, nil
 		}
 
-		conversationsManager, ok := ssh3Server.getConversationsManager(qconn)
+		conversationsManager, ok := ssh3Server.getConversationsManager(id)
 		if !ok {
-			err := fmt.Errorf("could not find SSH3 conversation for new channel %d on conn %+v", stream.StreamID(), qconn)
+			err := fmt.Errorf("could not find SSH3 conversation for new channel %d on conn %d", stream.StreamID(), id)
 			log.Error().Msgf("%s", err)
 			return false, err
 		}
@@ -104,28 +104,28 @@ func NewServer(maxPacketSize uint64, defaultDatagramQueueSize uint64, h3Server *
 	return ssh3Server
 }
 
-func (s *Server) getConversationsManager(streamCreator http3.StreamCreator) (*conversationsManager, bool) {
+func (s *Server) getConversationsManager(id quic.ConnectionTracingID) (*conversationsManager, bool) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
-	conversations, ok := s.conversations[streamCreator]
+	conversations, ok := s.conversations[id]
 	return conversations, ok
 }
 
-func (s *Server) getOrCreateConversationsManager(streamCreator http3.StreamCreator) *conversationsManager {
+func (s *Server) getOrCreateConversationsManager(id quic.ConnectionTracingID, conn http3.Connection) *conversationsManager {
 	s.lock.Lock()
 	defer s.lock.Unlock()
-	conversationsManager, ok := s.conversations[streamCreator]
+	conversationsManager, ok := s.conversations[id]
 	if !ok {
-		s.conversations[streamCreator] = newConversationManager(streamCreator)
-		conversationsManager = s.conversations[streamCreator]
+		s.conversations[id] = newConversationManager(conn)
+		conversationsManager = s.conversations[id]
 	}
 	return conversationsManager
 }
 
-func (s *Server) removeConnection(streamCreator http3.StreamCreator) {
+func (s *Server) removeConnection(id quic.ConnectionTracingID) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
-	delete(s.conversations, streamCreator)
+	delete(s.conversations, id)
 }
 
 type AuthenticatedHandlerFunc func(authenticatedUserName string, newConv *Conversation, w http.ResponseWriter, r *http.Request)
@@ -145,9 +145,14 @@ func (s *Server) GetHTTPHandlerFunc(ctx context.Context) AuthenticatedHandlerFun
 				log.Error().Msg("failed to hijack HTTP conversation: is it an HTTP/3 conversation ?")
 				return
 			}
-			streamCreator := hijacker.StreamCreator()
-			qconn := streamCreator.(quic.Connection)
-			conversationsManager := s.getOrCreateConversationsManager(streamCreator)
+			conn := hijacker.Connection()
+			qconn, ok := conn.(quic.Connection)
+			if !ok { // the concrete http3 connection embeds quic.Connection
+				log.Error().Msg("hijacked connection does not expose the quic-level API")
+				return
+			}
+			tracingID, _ := conn.Context().Value(quic.ConnectionTracingKey).(quic.ConnectionTracingID)
+			conversationsManager := s.getOrCreateConversationsManager(tracingID, conn)
 			conversationsManager.addConversation(newConv)
 
 			w.WriteHeader(200)
@@ -193,7 +198,7 @@ func (s *Server) GetHTTPHandlerFunc(ctx context.Context) AuthenticatedHandlerFun
 			go func() {
 				defer newConv.Close()
 				defer conversationsManager.removeConversation(newConv)
-				defer s.removeConnection(streamCreator)
+				defer s.removeConnection(tracingID)
 				if err := s.conversationHandler(authenticatedUsername, newConv); err != nil {
 					if errors.Is(err, context.Canceled) {
 						log.Info().Msgf("conversation canceled for conversation id %s, user %s", newConv.ConversationID(), authenticatedUsername)

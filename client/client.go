@@ -408,7 +408,7 @@ func Dial(ctx context.Context, config *client_config.Config, qconn quic.EarlyCon
 	}
 
 	log.Debug().Msgf("establish conversation with the server")
-	err = conv.EstablishClientConversation(req, roundTripper, ssh3.AVAILABLE_CLIENT_VERSIONS)
+	err = conv.EstablishClientConversation(req, qconn, roundTripper, ssh3.AVAILABLE_CLIENT_VERSIONS)
 	if errors.Is(err, util.Unauthorized{}) {
 		log.Error().Msgf("Access denied from the server: unauthorized")
 		return nil, err
