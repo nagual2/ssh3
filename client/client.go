@@ -15,7 +15,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -635,45 +634,6 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 		return err
 	}
 
-	// Synchronized between the stdin pump below and the session loop: the send
-	// half is closed (QUIC FIN) only after every local input byte was handed
-	// to the channel. An exit status received while it is still open means the
-	// remote command stopped consuming input early and the transfer was
-	// truncated (CTO task stage 1, bug 3).
-	var inputSent atomic.Bool
-	// closed on every return path of the stdin pump: an exit status that
-	// arrives while the pump is still running waits for it before deciding
-	// whether the transfer was truncated
-	pumpDone := make(chan struct{})
-
-	go func() {
-		defer close(pumpDone)
-		buf := make([]byte, channel.MaxPacketSize())
-		for {
-			n, err := os.Stdin.Read(buf)
-			if n > 0 {
-				_, err2 := channel.WriteData(buf[:n], ssh3Messages.SSH_EXTENDED_DATA_NONE)
-				if err2 != nil {
-					fmt.Fprintf(os.Stderr, "could not write data on channel: %+v", err2)
-					return
-				}
-			}
-			if err != nil {
-				if errors.Is(err, io.EOF) {
-					// local stdin is exhausted: half-close the send side of the channel
-					// (QUIC FIN) so the remote command sees the end of its input,
-					// otherwise a command reading until EOF (e.g. `cat > file`) hangs.
-					// The receive half stays open for the command output and exit status.
-					inputSent.Store(true)
-					channel.Close()
-					return
-				}
-				fmt.Fprintf(os.Stderr, "could not read data from stdin: %+v", err)
-				return
-			}
-		}
-	}()
-
 	// A trailing carriage return restores the prompt position after an
 	// interactive PTY session; in exec mode stdout is data, not a terminal,
 	// so it must stay byte-exact (e.g. piping through sha256sum).
@@ -681,98 +641,21 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 		defer fmt.Printf("\r")
 	}
 
-	for {
-		genericMessage, err := channel.NextMessage()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Could not get message: %+v\n", err)
-			os.Exit(-1)
-		}
-		switch message := genericMessage.(type) {
-		case *ssh3Messages.ChannelRequestMessage:
-			switch requestMessage := message.ChannelRequest.(type) {
-			case *ssh3Messages.PtyRequest:
-				fmt.Fprintf(os.Stderr, "receiving a pty request on the client is not implemented\n")
-			case *ssh3Messages.X11Request:
-				fmt.Fprintf(os.Stderr, "receiving a x11 request on the client is not implemented\n")
-			case *ssh3Messages.ShellRequest:
-				fmt.Fprintf(os.Stderr, "receiving a shell request on the client is not implemented\n")
-			case *ssh3Messages.ExecRequest:
-				fmt.Fprintf(os.Stderr, "receiving a exec request on the client is not implemented\n")
-			case *ssh3Messages.SubsystemRequest:
-				fmt.Fprintf(os.Stderr, "receiving a subsystem request on the client is not implemented\n")
-			case *ssh3Messages.WindowChangeRequest:
-				fmt.Fprintf(os.Stderr, "receiving a windowchange request on the client is not implemented\n")
-			case *ssh3Messages.SignalRequest:
-				fmt.Fprintf(os.Stderr, "receiving a signal request on the client is not implemented\n")
-			case *ssh3Messages.ExitStatusRequest:
-				log.Info().Msgf("ssh3: process exited with status: %d\n", requestMessage.ExitStatus)
-				exitStatus := int(requestMessage.ExitStatus)
-				if !ptyRequested && !inputSent.Load() {
-					// the stdin pump's final EOF read races with a fast remote
-					// exit: wait for the pump itself instead of a fixed grace,
-					// then re-check whether all input really made it out
-					select {
-					case <-pumpDone:
-					case <-time.After(2 * time.Second):
-					}
-				}
-				if !ptyRequested && !inputSent.Load() {
-					fmt.Fprintf(os.Stderr, "ssh3: remote command exited before all input was sent; the transfer was truncated\n")
-					// forward a distinct local error instead of the remote's
-					// success status, which would mask the data loss
-					exitStatus = 255
-				}
-				// An exit status does not end the byte stream: command output
-				// may still be in flight, and the channel ends with a
-				// server-side EOF only. Keep reading until that EOF (or a
-				// connection error) so the output tail is not silently dropped.
-				for {
-					message, err := channel.NextMessage()
-					if err != nil || message == nil {
-						break
-					}
-					if data, ok := message.(*ssh3Messages.DataOrExtendedDataMessage); ok {
-						switch data.DataType {
-						case ssh3Messages.SSH_EXTENDED_DATA_NONE:
-							if _, err := os.Stdout.Write([]byte(data.Data)); err != nil {
-								log.Fatal().Msgf("%s", err)
-							}
-						case ssh3Messages.SSH_EXTENDED_DATA_STDERR:
-							if _, err := os.Stderr.Write([]byte(data.Data)); err != nil {
-								log.Fatal().Msgf("%s", err)
-							}
-						}
-						continue
-					}
-					if request, ok := message.(*ssh3Messages.ChannelRequestMessage); ok {
-						if laterStatus, ok := request.ChannelRequest.(*ssh3Messages.ExitStatusRequest); ok {
-							exitStatus = int(laterStatus.ExitStatus)
-						}
-					}
-				}
-				// forward the process' status code to the user
-				return ExitStatus{StatusCode: exitStatus}
-			case *ssh3Messages.ExitSignalRequest:
-				log.Info().Msgf("ssh3: process exited with signal: %s: %s\n", requestMessage.SignalNameWithoutSig, requestMessage.ErrorMessageUTF8)
-				return ExitSignal{Signal: requestMessage.SignalNameWithoutSig, ErrorMessageUTF8: requestMessage.ErrorMessageUTF8}
-			}
-		case *ssh3Messages.DataOrExtendedDataMessage:
-			switch message.DataType {
-			case ssh3Messages.SSH_EXTENDED_DATA_NONE:
-				_, err = os.Stdout.Write([]byte(message.Data))
-				if err != nil {
-					log.Fatal().Msgf("%s", err)
-				}
-
-				log.Trace().Msgf("received data %s", message.Data)
-			case ssh3Messages.SSH_EXTENDED_DATA_STDERR:
-				_, err = os.Stderr.Write([]byte(message.Data))
-				if err != nil {
-					log.Fatal().Msgf("%s", err)
-				}
-
-				log.Trace().Msgf("received stderr data %s", message.Data)
-			}
-		}
+	// drive the session with the process stdio; a ControlMaster (stage 3.5)
+	// bridges other pipes into the same pump
+	err = pumpSessionStreams(channel, sessionIO{
+		stdin:  os.Stdin,
+		stdout: os.Stdout,
+		stderr: os.Stderr,
+	}, ptyRequested)
+	if err == nil {
+		return nil
 	}
+	switch err.(type) {
+	case ExitStatus, ExitSignal:
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Could not get message: %+v\n", err)
+	os.Exit(-1)
+	return nil
 }

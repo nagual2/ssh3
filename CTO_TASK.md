@@ -70,6 +70,37 @@ Acceptance: copy a 1 GiB tree with subdirectories over a lossy link (simulate wi
 4. Keepalives and connection migration sanity: NAT rebinding should not kill a session (QUIC gives this for free only if transport config enables migration — verify and test).
 5. Server ops: graceful shutdown on SIGTERM (finish active channels, configurable drain), systemd hardening docs (unit example with `ProtectSystem`, `PrivateTmp`), log to journald-friendly output.
 
+## 6b. Stage 3.5 — Connection multiplexing (ControlMaster) — P2, pilot-prioritized 2026-09-28
+
+ssh2-style ControlMaster for the Go client: one authenticated QUIC connection shared by many
+CLI invocations through a Unix-domain-socket control channel. Client-only; works against a
+stock ssh3-server.
+
+Design (verified against the code on 2026-09-28):
+
+| # | Element | Decision |
+|---|---------|----------|
+| 1 | Master | First invocation with `ControlMaster=auto/yes` + `ControlPath` performs connect+auth, then serves a UDS socket instead of running one session; `ControlPersist` keeps it in the background with an idle timeout |
+| 2 | Mux protocol | Own minimal versioned framing (not OpenSSH-wire compatible): `HELLO{v}`, `OPEN_SESSION{argv,env,pty,agent}`, `OPEN_FORWARD_TCP/UDP`, `EXIT`; UDS perms 0600, path `~/.ssh3/cm-<user>@<host>:<port>`; SO_PEERCRED uid check on Linux |
+| 3 | Slave | Later invocations connect to the UDS, request a session; master opens a channel via `Client.OpenChannel("session", …)` on the live connection and bridges bytes both ways |
+| 4 | Refactor | Extract `RunSession`'s stdio pumping into a variant over `io.ReadWriteCloser` so the master can serve slave sessions without owning process stdio |
+| 5 | Keepalive | Master-owned keepalives against the QUIC idle timeout; connection migration is a free win |
+| 6 | Portability | Windows AF_UNIX works but is a separate test track; Rust client adopts the same protocol later (parity, non-blocking) |
+
+Increments (TDD, each independently shippable):
+
+| # | Increment | Acceptance |
+|---|-----------|------------|
+| 1 | Session pump refactor over `io.ReadWriteCloser` | no behavior change; existing suites green |
+| 2 | Mux framing codec | unit tests: round-trip, version mismatch, garbage input |
+| 3 | Master + slave session bridging | integration test on loopback: slave session executes through master |
+| 4 | `ControlPersist`, idle timeout, `-O exit` control ops | master survives client exit; clean teardown |
+| 5 | Forwards through master | local TCP/UDP forward via slave request works |
+| 6 | Config plumbing (`-o ControlMaster/ControlPath/ControlPersist`) | flags documented in all READMEs |
+
+Definition of done: 100 sequential `ssh3 host true` — with a master: 1 handshake total and
+per-exec time ≤ 30% of the cold path; without: 100 handshakes. No new dependencies.
+
 ## 7. Stage 4 — Hardening & ecosystem (P3)
 
 1. External security review checklist: token replay across conversations (jti binding exists — prove it), header injection in CONNECT, QUIC amplification, DoS limits per conversation (MaxStartups analog), brute-force lockout.
