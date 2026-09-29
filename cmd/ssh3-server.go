@@ -40,6 +40,7 @@ import (
 
 	ssh3 "github.com/francoismichel/ssh3"
 	"github.com/francoismichel/ssh3/internal"
+	pprofutil "github.com/francoismichel/ssh3/internal/pprofutil"
 	ssh3Messages "github.com/francoismichel/ssh3/message"
 	"github.com/francoismichel/ssh3/server_auth"
 	util "github.com/francoismichel/ssh3/util"
@@ -863,6 +864,7 @@ func (i *autogenCertificates) Set(value string) error {
 }
 
 func ServerMain() int {
+	pprofutil.ServeIfEnabled(os.Getenv("SSH3_PPROF"))
 	bindAddr := flag.String("bind", "[::]:443", "the address:port pair to listen to, e.g. 0.0.0.0:443")
 	verbose := flag.Bool("v", false, "verbose mode, if set")
 	displayVersion := flag.Bool("version", false, "if set, displays the software version on standard output and exit")

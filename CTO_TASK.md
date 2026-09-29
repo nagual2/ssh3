@@ -70,6 +70,29 @@ Acceptance: copy a 1 GiB tree with subdirectories over a lossy link (simulate wi
 4. Keepalives and connection migration sanity: NAT rebinding should not kill a session (QUIC gives this for free only if transport config enables migration — verify and test).
 5. Server ops: graceful shutdown on SIGTERM (finish active channels, configurable drain), systemd hardening docs (unit example with `ProtectSystem`, `PrivateTmp`), log to journald-friendly output.
 
+## 6a. Stage 1.5 — Data-path performance — P1, pilot-prioritized 2026-09-29
+
+Close the loopback bulk-transfer gap exposed by the R3 benchmark
+(docs/BENCH-2026-09-29.md): SSH3 130 MB/s vs OpenSSH 365–488 MB/s (×2.8–3.7).
+
+Diagnosis constraints (verified 2026-09-29): AES-NI is already in use (Go
+crypto/aes hardware path on the bench CPU) — the cost is the userspace QUIC
+packet pipeline (per-packet syscalls, buffer copies, single connection loop),
+not the AES math. kTLS/kernel crypto is impossible for QUIC by protocol design.
+quic-go is pinned at v0.40.1 (2024-01); QUIC transport tuning is absent.
+
+Increments (measurement-driven; re-run B1/B2 after each):
+
+| # | Increment | Acceptance |
+|---|-----------|------------|
+| 1 | Profile harness: pprof hooks (opt-in flag) on client/server; quic-go-only microbench to separate transport ceiling from ssh3-layer overhead | hotspot profile committed to docs/ |
+| 2 | Transport tuning: GSO verification/activation, datagram size, flow-control windows and buffer sizes for bulk | B1 loopback improvement, each knob measured separately |
+| 3 | quic-go upgrade to current release, re-basing the deliberate vendor/h3 `:protocol=ssh3` shim | full Go + Rust interop suites green; B1/B2 re-measured |
+| 4 | (conditional on profile) ssh3-layer copies/buffering fixes | B1 loopback ≥ 250 MB/s; LAN within 15% of scp |
+
+Non-goal: kernel TLS / crypto offload (impossible for QUIC). For no-AES-NI
+targets (Atom), evaluate ChaCha20-Poly1305 cipher agreement instead.
+
 ## 6b. Stage 3.5 — Connection multiplexing (ControlMaster) — P2, pilot-prioritized 2026-09-28
 
 ssh2-style ControlMaster for the Go client: one authenticated QUIC connection shared by many

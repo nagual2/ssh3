@@ -1,0 +1,3 @@
+# Scripts are edited on Windows and executed in WSL: keep LF.
+*.sh text eol=lf
+*.py text eol=lf

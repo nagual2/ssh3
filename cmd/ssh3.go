@@ -29,6 +29,7 @@ import (
 	"github.com/francoismichel/ssh3/client"
 	client_config "github.com/francoismichel/ssh3/client/config"
 	"github.com/francoismichel/ssh3/internal"
+	pprofutil "github.com/francoismichel/ssh3/internal/pprofutil"
 	"github.com/francoismichel/ssh3/util"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
@@ -369,6 +370,7 @@ func (v *FlagValue) IsBoolFlag() bool {
 }
 
 func ClientMain() int {
+	pprofutil.ServeIfEnabled(os.Getenv("SSH3_PPROF"))
 	internal.CloseClientPluginsRegistry()
 	internal.CloseServerPluginsRegistry()
 
