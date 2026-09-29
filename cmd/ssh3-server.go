@@ -22,7 +22,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -354,7 +353,6 @@ func execCmdInBackground(channel ssh3.Channel, user *unix_util.User, session *ru
 		stdoutChan := make(chan readResult, 1)
 		stderrChan := make(chan readResult, 1)
 		execExitStatus := uint64(0)
-		var stdoutBytes atomic.Uint64
 
 		readStdout := func() {
 			defer close(stdoutChan)
@@ -404,7 +402,6 @@ func execCmdInBackground(channel ssh3.Channel, user *unix_util.User, session *ru
 						log.Error().Msgf("could not write the pty's output in an SSH message: %+v\n", err)
 						return
 					}
-					stdoutBytes.Add(uint64(len(buf))) // DIAGNOSTIC
 					if err != nil && !errors.Is(err, io.EOF) {
 						log.Info().Msgf("could not read the pty's output, it might have been closed by the running process: %s", err)
 					}
@@ -438,7 +435,6 @@ func execCmdInBackground(channel ssh3.Channel, user *unix_util.User, session *ru
 						execExitStatus = safeExitStatus(exitError.ExitCode())
 					}
 				}
-				fmt.Fprintf(os.Stderr, "DIAG_SERVED channel=%d bytes=%d\n", channel.ChannelID(), stdoutBytes.Load()) // DIAGNOSTIC
 				log.Debug().Msgf("sending exit-status %d on channel %d", execExitStatus, channel.ChannelID())
 				err := channel.SendRequest(&ssh3Messages.ChannelRequestMessage{
 					WantReply:      false,

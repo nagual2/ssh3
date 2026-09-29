@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
@@ -17,6 +18,14 @@ import (
 )
 
 type ServerConversationHandler func(authenticatedUsername string, conversation *Conversation) error
+
+// conversationRegistrationTimeout bounds how long the stream hijacker waits for the
+// conversation of a freshly accepted connection to show up in the server's map.
+const conversationRegistrationTimeout = 2 * time.Second
+
+// conversationRegistrationPollInterval is the retry granularity used while waiting
+// for that registration.
+const conversationRegistrationPollInterval = 200 * time.Microsecond
 
 type Server struct {
 	maxPacketSize       uint64
@@ -47,6 +56,16 @@ func NewServer(maxPacketSize uint64, defaultDatagramQueueSize uint64, h3Server *
 		}
 
 		conversationsManager, ok := ssh3Server.getConversationsManager(id)
+		if !ok {
+			// The client opens a channel as soon as it gets the 200 response to its
+			// CONNECT request, while the conversation is registered by the handler
+			// serving that request on another goroutine. Both events concern the
+			// same QUIC connection but nothing orders them, so the hijacker can be
+			// entered before the registration is visible. Wait for it instead of
+			// rejecting the channel: a hard failure here makes the server cancel
+			// the stream (H3_REQUEST_INCOMPLETE) and the client aborts.
+			conversationsManager, ok = ssh3Server.waitForConversationsManager(id, conversationRegistrationTimeout)
+		}
 		if !ok {
 			err := fmt.Errorf("could not find SSH3 conversation for new channel %d on conn %d", stream.StreamID(), id)
 			log.Error().Msgf("%s", err)
@@ -109,6 +128,25 @@ func (s *Server) getConversationsManager(id quic.ConnectionTracingID) (*conversa
 	defer s.lock.Unlock()
 	conversations, ok := s.conversations[id]
 	return conversations, ok
+}
+
+// waitForConversationsManager polls the conversation map until the conversation for
+// the given connection is registered or the timeout expires. A channel stream can
+// reach the hijacker before the CONNECT request handler that registers the
+// conversation has run, because both are handled concurrently on the same QUIC
+// connection.
+func (s *Server) waitForConversationsManager(id quic.ConnectionTracingID, timeout time.Duration) (*conversationsManager, bool) {
+	deadline := time.Now().Add(timeout)
+	for {
+		conversationsManager, ok := s.getConversationsManager(id)
+		if ok {
+			return conversationsManager, true
+		}
+		if !time.Now().Before(deadline) {
+			return nil, false
+		}
+		time.Sleep(conversationRegistrationPollInterval)
+	}
 }
 
 func (s *Server) getOrCreateConversationsManager(id quic.ConnectionTracingID, conn http3.Connection) *conversationsManager {
