@@ -1011,6 +1011,11 @@ func ServerMain() int {
 
 	quicConf := &quic.Config{
 		Allow0RTT: true,
+		// bulk-transfer tuning: large flow control windows (stage 1.5)
+		InitialStreamReceiveWindow:     8 << 20,
+		MaxStreamReceiveWindow:         16 << 20,
+		InitialConnectionReceiveWindow: 16 << 20,
+		MaxConnectionReceiveWindow:     32 << 20,
 	}
 
 	var err error

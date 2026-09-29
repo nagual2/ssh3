@@ -103,6 +103,13 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 	qconf.Allow0RTT = true
 	qconf.EnableDatagrams = true
 	qconf.KeepAlivePeriod = 1 * time.Second
+	// bulk-transfer tuning: start with full-size packets and large flow
+	// control windows so a 512 MiB stream does not stall on window updates
+	qconf.InitialPacketSize = 1350
+	qconf.InitialStreamReceiveWindow = 8 << 20
+	qconf.MaxStreamReceiveWindow = 16 << 20
+	qconf.InitialConnectionReceiveWindow = 16 << 20
+	qconf.MaxConnectionReceiveWindow = 32 << 20
 
 	if certs, ok := knownHosts[options.CanonicalHostFormat()]; ok {
 		foundSelfsignedSSH3 := false
