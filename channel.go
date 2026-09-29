@@ -321,16 +321,20 @@ func (c *channelImpl) WriteData(dataBuf []byte, dataType ssh3.SSHDataType) (int,
 		}
 		emptyMsgLen := dataMsg.Length()
 		msgLen := util.MinUint64(c.ChannelInfo.MaxPacketSize-uint64(emptyMsgLen), uint64(len(dataBuf)))
-
-		dataMsg.Data = string(dataBuf[:msgLen])
+		chunk := dataBuf[:msgLen]
 		dataBuf = dataBuf[msgLen:]
-		// TODO: avoid unnecessary copies and buffer creations
-		msgBuf := make([]byte, dataMsg.Length())
-		_, err := dataMsg.Write(msgBuf)
+
+		// marshal only the small frame header and write the payload as-is:
+		// copying 30 KiB per message (string conversion + buffer marshal)
+		// showed up as memmove/GC pressure in the data-path profile
+		// (docs/PROFILE-2026-09-29.md); the byte stream is identical
+		hdr := dataMsg.MarshalHeader(uint64(msgLen))
+		n, err := c.send.Write(hdr)
+		written += n
 		if err != nil {
 			return written, err
 		}
-		n, err := c.send.Write(msgBuf)
+		n, err = c.send.Write(chunk)
 		written += n
 		if err != nil {
 			return written, err

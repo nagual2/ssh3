@@ -180,6 +180,20 @@ func (m *DataOrExtendedDataMessage) Length() int {
 	return int(messageTypeLen) + int(util.VarIntLen(uint64(m.DataType))) + int(util.SSHStringLen(m.Data))
 }
 
+// MarshalHeader returns the message framing for a DataOrExtendedData message
+// whose dataSize-byte payload is written separately. The concatenation of the
+// returned header and the payload is byte-for-byte identical to the output of
+// Write for the same message, letting the sender avoid copying the payload.
+func (m *DataOrExtendedDataMessage) MarshalHeader(dataSize uint64) []byte {
+	if m.DataType != SSH_EXTENDED_DATA_NONE {
+		buf := util.AppendVarInt(nil, uint64(SSH_MSG_CHANNEL_EXTENDED_DATA))
+		buf = util.AppendVarInt(buf, uint64(m.DataType))
+		return util.AppendVarInt(buf, dataSize)
+	}
+	buf := util.AppendVarInt(nil, uint64(SSH_MSG_CHANNEL_DATA))
+	return util.AppendVarInt(buf, dataSize)
+}
+
 func ParseExtendedDataMessage(buf util.Reader) (*DataOrExtendedDataMessage, error) {
 	dataType, err := util.ReadVarInt(buf)
 	if err != nil {
