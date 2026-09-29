@@ -52,8 +52,16 @@ func homedir() string {
 // Prepares the QUIC connection that will be used by SSH3
 // If non-nil, use udpConn as transport (can be used for proxy jump)
 // Otherwise, create a UDPConn from udp://host:port
+// quicTuning groups the QUIC transport keys exposed for bulk-transfer tuning
+// (stage 1.5): large flow control windows and initial packet size.
+type quicTuning struct {
+	InitialPacketSize uint16
+	StreamRxWindowMiB int
+	ConnRxWindowMiB   int
+}
+
 func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog io.Writer, ssh3Dir string, certPool *x509.CertPool, knownHostsPath string, knownHosts ssh3.KnownHosts,
-	oidcConfig []*oidc.OIDCConfig, options *client_config.Config, proxyRemoteAddr *net.UDPAddr, tty *os.File) (quic.EarlyConnection, int) {
+	oidcConfig []*oidc.OIDCConfig, options *client_config.Config, proxyRemoteAddr *net.UDPAddr, tty *os.File, tuning quicTuning) (quic.EarlyConnection, int) {
 
 	var err error
 	remoteAddr := proxyRemoteAddr
@@ -382,6 +390,9 @@ func ClientMain() int {
 	oidcConfigFileName := flag.String("oidc-config", "", "OpenID Connect json config file containing the \"client_id\" and \"client_secret\" fields needed for most identity providers")
 	verbose := flag.Bool("v", false, "if set, enable verbose mode")
 	displayVersion := flag.Bool("version", false, "if set, displays the software version on standard output and exit")
+	streamRxMiB := flag.Int("stream-rx-mb", 8, "initial per-stream flow control receive window in MiB")
+	connRxMiB := flag.Int("conn-rx-mb", 16, "initial connection-level flow control receive window in MiB")
+	packetSize := flag.Int("packet-size", 1350, "initial QUIC packet size in bytes")
 	noPKCE := flag.Bool("no-pkce", false, "if set perform PKCE challenge-response with oidc")
 	forwardSSHAgent := flag.Bool("forward-agent", false, "if set, forwards ssh agent to be used with sshv2 connections on the remote host")
 	forwardUDP := flag.String("forward-udp", "", "if set, take a localport/remoteip@remoteport forwarding localhost@localport towards remoteip@remoteport")
@@ -409,6 +420,12 @@ func ClientMain() int {
 
 	flag.Parse()
 	args := flag.Args()
+	// dereference the tuning keys only after flag.Parse
+	tuning := quicTuning{
+		InitialPacketSize: uint16(*packetSize),
+		StreamRxWindowMiB: *streamRxMiB,
+		ConnRxWindowMiB:   *connRxMiB,
+	}
 
 	if *displayVersion {
 		fmt.Fprintln(os.Stdout, filepath.Base(os.Args[0]), "version", ssh3.GetCurrentSoftwareVersion())
@@ -690,7 +707,7 @@ func ClientMain() int {
 			log.Error().Msgf("Could not get connection material for proxy %s: %s", proxyParsedUrl, err)
 			return -1
 		}
-		qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, proxyOptions, nil, tty)
+		qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, proxyOptions, nil, tty, tuning)
 
 		if qconn == nil {
 			if status != 0 {
@@ -728,7 +745,7 @@ func ClientMain() int {
 		log.Debug().Msgf("started proxy jump at %s", proxyAddress)
 	}
 
-	qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, options, proxyAddress, tty)
+	qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, options, proxyAddress, tty, tuning)
 
 	if qconn == nil {
 		if status != 0 {
