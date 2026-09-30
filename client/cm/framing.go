@@ -28,6 +28,8 @@ const (
 	MsgExit           MsgType = 5
 	MsgOK             MsgType = 6
 	MsgError          MsgType = 7
+	MsgAttach         MsgType = 8
+	MsgExitStatus     MsgType = 9
 )
 
 // magic tags every frame so a garbage dialer (HTTP probe, stray client)

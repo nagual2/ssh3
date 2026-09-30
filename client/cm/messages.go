@@ -4,7 +4,10 @@ package cm
 // strings; decoders are strict (truncation and trailing bytes are errors)
 // so a desynchronized stream fails loudly instead of mis-decoding.
 
-import "encoding/binary"
+import (
+	"crypto/rand"
+	"encoding/binary"
+)
 
 // PtySpec requests a remote pty; nil in OpenSession means no pty.
 type PtySpec struct {
@@ -29,6 +32,73 @@ type OpenForward struct {
 	ListenAddr string // local side; "" lets the master pick one
 	TargetAddr string // remote side the master connects/forwards to
 }
+
+// Token identifies one bridged session between the control connection and
+// the stream attachments.
+type Token [16]byte
+
+// NewToken generates a fresh session token.
+func NewToken() (Token, error) {
+	var t Token
+	if _, err := rand.Read(t[:]); err != nil {
+		return t, err
+	}
+	return t, nil
+}
+
+// StreamKind selects which data stream an attachment carries.
+type StreamKind uint8
+
+const (
+	StreamIO     StreamKind = 0 // full duplex: slave stdin up, session stdout down
+	StreamStderr StreamKind = 1 // master → slave only
+)
+
+// Attach binds a dedicated stream connection to a bridged session. The
+// stderr stream must attach before the io stream: the master starts the
+// session pump on the io attachment and needs the stderr sink by then.
+type Attach struct {
+	Token  Token
+	Stream StreamKind
+}
+
+// Encode marshals the message.
+func (m *Attach) Encode() []byte {
+	b := make([]byte, 0, 17)
+	b = append(b, m.Token[:]...)
+	return append(b, byte(m.Stream))
+}
+
+// Decode unmarshals the message; malformed input is an error.
+func (m *Attach) Decode(payload []byte) error {
+	if len(payload) != 17 {
+		return errShort
+	}
+	copy(m.Token[:], payload)
+	switch StreamKind(payload[16]) {
+	case StreamIO:
+		m.Stream = StreamIO
+	case StreamStderr:
+		m.Stream = StreamStderr
+	default:
+		return errTrailing
+	}
+	return nil
+}
+
+// EncodeExitStatus marshals a session exit status (8 bytes, big endian).
+func EncodeExitStatus(code uint64) []byte {
+	return binary.BigEndian.AppendUint64(nil, code)
+}
+
+// DecodeExitStatus unmarshals a session exit status.
+func DecodeExitStatus(payload []byte) (uint64, error) {
+	if len(payload) != 8 {
+		return 0, errShort
+	}
+	return binary.BigEndian.Uint64(payload), nil
+}
+
 
 func appendStr(b []byte, s string) []byte {
 	b = binary.BigEndian.AppendUint32(b, uint32(len(s)))
