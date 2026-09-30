@@ -6,7 +6,6 @@ package client
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -231,12 +230,12 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 }
 
 type Client struct {
-	qconn quic.EarlyConnection
+	qconn *quic.Conn
 	*ssh3.Conversation
 }
 
-func Dial(ctx context.Context, config *client_config.Config, qconn quic.EarlyConnection,
-	roundTripper *http3.RoundTripper,
+func Dial(ctx context.Context, config *client_config.Config, qconn *quic.Conn,
+	transport *http3.Transport,
 	sshAgent agent.ExtendedAgent) (*Client, error) {
 
 	hostUrl := url.URL{}
@@ -267,10 +266,9 @@ func Dial(ctx context.Context, config *client_config.Config, qconn quic.EarlyCon
 		}
 	}
 
-	// dirty hack: ensure only one QUIC connection is used
-	roundTripper.Dial = func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
-		return qconn, nil
-	}
+	// the transport is not used for dialing: the raw client conn is created
+	// directly on the QUIC connection dialed above, so there is no need for the
+	// one-connection hack anymore
 
 	// Do 0RTT GET requests here if needed
 	// Currently, we don't need it but we could use it to retrieve
@@ -296,12 +294,12 @@ func Dial(ctx context.Context, config *client_config.Config, qconn quic.EarlyCon
 	foundSuitableAuthPlugin := false
 	plugins := internal.GetClientAuthPlugins()
 	for _, plugin := range plugins {
-		authMethods, err := plugin.PluginFunc(req, sshAgent, config, roundTripper)
+		authMethods, err := plugin.PluginFunc(req, sshAgent, config, transport)
 		if err != nil {
 			return nil, err
 		}
 		for _, authMethod := range authMethods {
-			err = authMethod.PrepareRequestForAuth(req, sshAgent, roundTripper, config.Username(), conv)
+			err = authMethod.PrepareRequestForAuth(req, sshAgent, transport, config.Username(), conv)
 			if err != nil {
 				log.Error().Msgf("error when preparing request for auth plugin %T: %s", plugin, err)
 				return nil, err
@@ -408,7 +406,7 @@ func Dial(ctx context.Context, config *client_config.Config, qconn quic.EarlyCon
 	}
 
 	log.Debug().Msgf("establish conversation with the server")
-	err = conv.EstablishClientConversation(req, qconn, roundTripper, ssh3.AVAILABLE_CLIENT_VERSIONS)
+	err = conv.EstablishClientConversation(req, qconn, transport, ssh3.AVAILABLE_CLIENT_VERSIONS)
 	if errors.Is(err, util.Unauthorized{}) {
 		log.Error().Msgf("Access denied from the server: unauthorized")
 		return nil, err

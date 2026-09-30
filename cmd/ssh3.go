@@ -53,7 +53,7 @@ func homedir() string {
 // If non-nil, use udpConn as transport (can be used for proxy jump)
 // Otherwise, create a UDPConn from udp://host:port
 func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog io.Writer, ssh3Dir string, certPool *x509.CertPool, knownHostsPath string, knownHosts ssh3.KnownHosts,
-	oidcConfig []*oidc.OIDCConfig, options *client_config.Config, proxyRemoteAddr *net.UDPAddr, tty *os.File) (quic.EarlyConnection, int) {
+	oidcConfig []*oidc.OIDCConfig, options *client_config.Config, proxyRemoteAddr *net.UDPAddr, tty *os.File) (*quic.Conn, int) {
 
 	var err error
 	remoteAddr := proxyRemoteAddr
@@ -702,9 +702,9 @@ func ClientMain() int {
 		// no EnableDatagrams: ssh3 carries UDP forwarding over the raw QUIC
 		// datagram API, and the HTTP/3 datagram layer would compete with it for
 		// datagrams on the same connection
-		roundTripper := &http3.RoundTripper{}
+		transport := &http3.Transport{}
 
-		proxyClient, err := client.Dial(ctx, proxyOptions, qconn, roundTripper, proxyAgentClient)
+		proxyClient, err := client.Dial(ctx, proxyOptions, qconn, transport, proxyAgentClient)
 		if err != nil {
 			log.Error().Msgf("could not establish SSH3 proxy conversation: %s", err)
 			return -1
@@ -741,9 +741,9 @@ func ClientMain() int {
 	// no EnableDatagrams: ssh3 carries UDP forwarding over the raw QUIC datagram
 	// API, and the HTTP/3 datagram layer would compete with it for datagrams on
 	// the same connection
-	roundTripper := &http3.RoundTripper{}
+	transport := &http3.Transport{}
 
-	c, err := client.Dial(ctx, options, qconn, roundTripper, agentClient)
+	c, err := client.Dial(ctx, options, qconn, transport, agentClient)
 	if err != nil {
 		log.Error().Msgf("could not dial %s: %s", options.CanonicalHostFormat(), err)
 		return -1

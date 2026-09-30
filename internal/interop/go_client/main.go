@@ -120,12 +120,12 @@ func run() int {
 	}
 	defer qconn.CloseWithError(0, "done")
 
-	roundTripper := &http3.RoundTripper{
+	transport := &http3.Transport{
 		EnableDatagrams: true,
 	}
-	defer roundTripper.Close()
+	defer transport.Close()
 
-	sshClient, err := client.Dial(context.Background(), config, qconn, roundTripper, nil)
+	sshClient, err := client.Dial(context.Background(), config, qconn, transport, nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "could not establish SSH3 conversation: %s\n", err)
 		return 1

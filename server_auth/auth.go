@@ -11,7 +11,6 @@ import (
 	"github.com/francoismichel/ssh3"
 	"github.com/francoismichel/ssh3/util/unix_util"
 
-	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/rs/zerolog/log"
 )
@@ -37,15 +36,16 @@ func HandleAuths(ctx context.Context, enablePasswordLogin bool, defaultMaxPacket
 		// Only call Flush() here, as calling flush prevents from adding the Content-Length header to the response
 		// The Content-Length can be useful upon receiving an error response
 		defer w.(http.Flusher).Flush()
-		hijacker, ok := w.(http3.Hijacker)
-		if !ok { // should never happen, unless quic-go change their API
-			log.Error().Msgf("failed to hijack")
+
+		// quic-go v0.63 removed http3.Hijacker: the QUIC connection is retrieved
+		// from the request context, where the http3.Server.ConnContext hook put it
+		qconn, ok := ssh3.QuicConnFromContext(r.Context())
+		if !ok {
+			log.Error().Msgf("failed to get the QUIC connection from the request context")
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
-		conn := hijacker.Connection()
-		qconn := conn.(quic.Connection)
 		if !qconn.ConnectionState().TLS.HandshakeComplete {
 			// do not process early data (0-RTT) when performing authorization
 			// to avoid replay attacks
@@ -53,7 +53,7 @@ func HandleAuths(ctx context.Context, enablePasswordLogin bool, defaultMaxPacket
 			return
 		}
 		str := w.(http3.HTTPStreamer).HTTPStream()
-		conv, err := ssh3.NewServerConversation(ctx, str, conn, qconn, defaultMaxPacketSize, peerVersion)
+		conv, err := ssh3.NewServerConversation(ctx, str, qconn, qconn, defaultMaxPacketSize, peerVersion)
 		if err != nil {
 			log.Error().Msgf("could not create new server conversation")
 			w.WriteHeader(http.StatusInternalServerError)

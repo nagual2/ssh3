@@ -37,7 +37,7 @@ type ServerAuthPlugin func(username string, identityStr string) (RequestIdentity
 // GetClientAuthMethodsFunc can return a slice containing one ClientAuthMethod for
 // each private key file it wants to try.
 // if no SSH agent socket if found, sshAgent is nil
-type GetClientAuthMethodsFunc func(request *http.Request, sshAgent agent.ExtendedAgent, clientConfig *client_config.Config, roundTripper *http3.RoundTripper) ([]ClientAuthMethod, error)
+type GetClientAuthMethodsFunc func(request *http.Request, sshAgent agent.ExtendedAgent, clientConfig *client_config.Config, transport *http3.Transport) ([]ClientAuthMethod, error)
 
 type ClientAuthMethod interface {
 	// PrepareRequestForAuth updated the provided request with the needed headers
@@ -45,11 +45,11 @@ type ClientAuthMethod interface {
 	// The method must not alter the request method (must always be CONNECT) nor the
 	// Host/:origin, User-Agent or :path headers.
 	// The agent is the connected SSH agent if it exists, nil otherwise
-	// The provided roundTripper can be used to perform requests with the server to prepare
+	// The provided transport can be used to perform requests with the server to prepare
 	// the authentication process.
 	// username is the username to authenticate
 	// conversation is the Conversation we want to establish
-	PrepareRequestForAuth(request *http.Request, sshAgent agent.ExtendedAgent, roundTripper *http3.RoundTripper, username string, conversation *ssh3.Conversation) error
+	PrepareRequestForAuth(request *http.Request, sshAgent agent.ExtendedAgent, transport *http3.Transport, username string, conversation *ssh3.Conversation) error
 }
 
 type ClientAuthPlugin struct {
