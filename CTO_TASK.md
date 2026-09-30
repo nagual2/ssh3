@@ -26,6 +26,8 @@ Build notes (reproduce before hacking):
 # If nuked, restore with: git checkout dba4017 -- vendor/h3
 CGO_ENABLED=0 go build -tags disable_password_auth -o bin/ssh3 ./cmd/ssh3
 CGO_ENABLED=0 go build -tags disable_password_auth -o bin/ssh3-server ./cmd/ssh3-server
+# Windows client (host build or cross): bin/ is gitignored, live-tested 2026-09-30
+CGO_ENABLED=0 GOOS=windows go build -tags disable_password_auth -ldflags "-s -w" -o bin/ssh3.exe ./cmd/ssh3
 # Server needs a writable log target: env SSH3_LOG_FILE=/tmp/ssh3.log (default /var/log/ssh3.log fails unprivileged)
 ```
 
