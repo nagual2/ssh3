@@ -699,9 +699,10 @@ func ClientMain() int {
 			return status
 		}
 
-		roundTripper := &http3.RoundTripper{
-			EnableDatagrams: true,
-		}
+		// no EnableDatagrams: ssh3 carries UDP forwarding over the raw QUIC
+		// datagram API, and the HTTP/3 datagram layer would compete with it for
+		// datagrams on the same connection
+		roundTripper := &http3.RoundTripper{}
 
 		proxyClient, err := client.Dial(ctx, proxyOptions, qconn, roundTripper, proxyAgentClient)
 		if err != nil {
@@ -737,9 +738,10 @@ func ClientMain() int {
 		return status
 	}
 
-	roundTripper := &http3.RoundTripper{
-		EnableDatagrams: true,
-	}
+	// no EnableDatagrams: ssh3 carries UDP forwarding over the raw QUIC datagram
+	// API, and the HTTP/3 datagram layer would compete with it for datagrams on
+	// the same connection
+	roundTripper := &http3.RoundTripper{}
 
 	c, err := client.Dial(ctx, options, qconn, roundTripper, agentClient)
 	if err != nil {

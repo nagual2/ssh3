@@ -5,7 +5,12 @@ import (
 
 	"github.com/francoismichel/ssh3/util"
 	"github.com/quic-go/quic-go/http3"
+	"github.com/rs/zerolog/log"
 )
+
+// danglingDatagramQueueSize bounds how many datagrams are buffered per channel
+// while waiting for that channel to be registered by its owner.
+const danglingDatagramQueueSize = 64
 
 type ControlStreamID = uint64
 
@@ -58,17 +63,26 @@ func (m *channelsManager) addChannel(channel Channel) {
 	m.channels[util.ChannelID(channel.ChannelID())] = channel
 }
 
-func (m *channelsManager) addDanglingDatagramsQueue(id util.ChannelID, queue *util.DatagramsQueue) {
+// addDanglingDatagramsQueue buffers a datagram that arrived before its channel
+// was registered. Datagrams for the same channel accumulate in a single queue:
+// storing a fresh queue per arrival would silently drop everything buffered so far.
+// It must not block, since the caller's datagram loop is shared by every channel of
+// the conversation.
+func (m *channelsManager) addDanglingDatagramsQueue(id util.ChannelID, datagram []byte) {
 	m.lock.Lock()
 	defer m.lock.Unlock()
-	// let's first check if a channel has recently been added
+	// the channel may have been registered between the caller's lookup and this call
 	if channel, ok := m.channels[id]; ok {
-		dgram := queue.Next()
-		for ; dgram != nil; dgram = queue.Next() {
-			channel.addDatagram(dgram)
-		}
-	} else {
+		channel.addDatagram(datagram)
+		return
+	}
+	queue, ok := m.danglingDgramQueues[id]
+	if !ok {
+		queue = util.NewDatagramsQueue(danglingDatagramQueueSize)
 		m.danglingDgramQueues[id] = queue
+	}
+	if !queue.Add(datagram) {
+		log.Warn().Msgf("dangling datagram queue for channel %d is full, dropping datagram", id)
 	}
 }
 

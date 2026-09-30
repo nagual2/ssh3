@@ -1007,16 +1007,21 @@ func ServerMain() int {
 
 	quicConf := &quic.Config{
 		Allow0RTT: true,
+		// ssh3 tunnels its own datagrams (UDP forwarding) straight over the QUIC
+		// datagram API. The HTTP/3 datagram layer must stay disabled: it starts a
+		// second reader on the same connection-wide datagram queue and would steal
+		// roughly half of the datagrams ssh3 needs.
+		EnableDatagrams: true,
 	}
 
 	var err error
 
 	server := http3.Server{
-		Handler:         nil,
-		Addr:            *bindAddr,
-		QUICConfig:      quicConf,
-		EnableDatagrams: true,
-		TLSConfig:       tlsConfig,
+		Handler:    nil,
+		Addr:       *bindAddr,
+		QUICConfig: quicConf,
+		// deliberately NOT EnableDatagrams: see quicConf above
+		TLSConfig: tlsConfig,
 	}
 
 	mux := http.NewServeMux()
