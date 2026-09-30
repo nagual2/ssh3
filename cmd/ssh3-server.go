@@ -869,6 +869,9 @@ func ServerMain() int {
 	verbose := flag.Bool("v", false, "verbose mode, if set")
 	displayVersion := flag.Bool("version", false, "if set, displays the software version on standard output and exit")
 	urlPath := flag.String("url-path", "/ssh3-term", "the secret URL path on which the ssh3 server listens")
+	streamRxMiB := flag.Int("stream-rx-mb", 8, "initial per-stream flow control receive window in MiB")
+	connRxMiB := flag.Int("conn-rx-mb", 16, "initial connection-level flow control receive window in MiB")
+	initialPacketSize := flag.Int("initial-packet-size", 1350, "initial QUIC packet size in bytes")
 	generateSelfSignedCert := flag.Bool("generate-selfsigned-cert", false, "if set, generates a self-self-signed cerificate and key "+
 		"that will be stored at the paths indicated by the -cert and -key args (they must not already exist)")
 	certPath := flag.String("cert", "./cert.pem", "the filename of the server certificate (or fullchain)")
@@ -1015,7 +1018,12 @@ func ServerMain() int {
 		// datagram API. The HTTP/3 datagram layer must stay disabled: it starts a
 		// second reader on the same connection-wide datagram queue and would steal
 		// roughly half of the datagrams ssh3 needs.
-		EnableDatagrams: true,
+		EnableDatagrams:                true,
+		InitialStreamReceiveWindow:     uint64(*streamRxMiB) << 20,
+		MaxStreamReceiveWindow:         uint64(*streamRxMiB) << 21,
+		InitialConnectionReceiveWindow: uint64(*connRxMiB) << 20,
+		MaxConnectionReceiveWindow:     uint64(*connRxMiB) << 21,
+		InitialPacketSize:              uint16(*initialPacketSize),
 	}
 
 	var err error
