@@ -27,6 +27,10 @@ type sessionIO struct {
 // arrives while input is still pending (stage 1, bug 3); shortened in tests.
 var truncationGrace = 2 * time.Second
 
+// ptyExitGrace bounds the post-exit-status output drain of a PTY session
+// (stage 1, bug 5); shortened in tests.
+var ptyExitGrace = 1 * time.Second
+
 // sessionChannel is the slice of ssh3.Channel the session pump needs. Narrow
 // on purpose: ssh3.Channel carries unexported methods, so tests satisfy this
 // consumer-side interface with an in-memory fake instead.
@@ -35,6 +39,7 @@ type sessionChannel interface {
 	WriteData(dataBuf []byte, dataType ssh3Messages.SSHDataType) (int, error)
 	NextMessage() (ssh3Messages.Message, error)
 	Close()
+	CancelRead()
 }
 
 // writeSessionData routes one channel data message to stdout/stderr.
@@ -138,6 +143,18 @@ func pumpSessionStreams(channel sessionChannel, sio sessionIO, ptyRequested bool
 				// may still be in flight, and the channel ends with a
 				// server-side EOF only. Keep reading until that EOF (or a
 				// connection error) so the output tail is not silently dropped.
+				if ptyRequested {
+					// The remote shell is gone, so no further input can be
+					// consumed: half-close the send side so the server is
+					// free to end the channel. A raw console stdin never
+					// EOFs on its own, and without this FIN the server may
+					// keep the channel open forever (stage 1, bug 5).
+					channel.Close()
+					// Whatever the server does, the drain must not hang
+					// forever: once the grace window elapses, cancel the
+					// pending read and leave with the received status.
+					time.AfterFunc(ptyExitGrace, channel.CancelRead)
+				}
 				for {
 					message, err := channel.NextMessage()
 					if err != nil || message == nil {

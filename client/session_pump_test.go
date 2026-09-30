@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,25 +17,31 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	// keep the truncation wait short so tests stay fast and deterministic
-	old := truncationGrace
+	// keep the grace waits short so tests stay fast and deterministic
+	oldTruncation := truncationGrace
+	oldPty := ptyExitGrace
 	truncationGrace = 100 * time.Millisecond
-	defer func() { truncationGrace = old }()
+	ptyExitGrace = 100 * time.Millisecond
+	defer func() { truncationGrace = oldTruncation; ptyExitGrace = oldPty }()
 	m.Run()
 }
 
 // fakeChannel implements sessionChannel in-memory: it records what the stdin
 // pump wrote and replays scripted messages to the drain loop.
 type fakeChannel struct {
-	msgs      chan ssh3Messages.Message
-	written   [][]byte
-	writeErr  error
-	closed    atomic.Bool
-	maxPacket uint64
+	msgs       chan ssh3Messages.Message
+	written    [][]byte
+	writeErr   error
+	closed     atomic.Bool
+	closeOnFin bool
+	finOnce    sync.Once
+	abort      chan struct{}
+	abortOnce  sync.Once
+	maxPacket  uint64
 }
 
 func newFakeChannel() *fakeChannel {
-	return &fakeChannel{msgs: make(chan ssh3Messages.Message, 16), maxPacket: 32768}
+	return &fakeChannel{msgs: make(chan ssh3Messages.Message, 16), abort: make(chan struct{}), maxPacket: 32768}
 }
 
 func (f *fakeChannel) MaxPacketSize() uint64 { return f.maxPacket }
@@ -48,15 +55,31 @@ func (f *fakeChannel) WriteData(dataBuf []byte, dataType ssh3Messages.SSHDataTyp
 }
 
 func (f *fakeChannel) NextMessage() (ssh3Messages.Message, error) {
-	m, ok := <-f.msgs
-	if !ok {
-		// a closed channel ends the post-exit-status drain (nil message)
-		return nil, nil
+	select {
+	case m, ok := <-f.msgs:
+		if !ok {
+			// a closed channel ends the post-exit-status drain (nil message)
+			return nil, nil
+		}
+		return m, nil
+	case <-f.abort:
+		// read canceled after the grace window; the drain treats any error
+		// as the end of the channel
+		return nil, io.ErrClosedPipe
 	}
-	return m, nil
 }
 
-func (f *fakeChannel) Close() { f.closed.Store(true) }
+func (f *fakeChannel) Close() {
+	f.closed.Store(true)
+	if f.closeOnFin {
+		// cooperative-server mode: the channel ends once the client FINs
+		f.finOnce.Do(func() { close(f.msgs) })
+	}
+}
+
+func (f *fakeChannel) CancelRead() {
+	f.abortOnce.Do(func() { close(f.abort) })
+}
 
 func dataMsg(s string) *ssh3Messages.DataOrExtendedDataMessage {
 	return &ssh3Messages.DataOrExtendedDataMessage{DataType: ssh3Messages.SSH_EXTENDED_DATA_NONE, Data: s}
@@ -155,5 +178,76 @@ func TestPumpTruncatedTransferDetected(t *testing.T) {
 	}
 	if es.StatusCode != 255 {
 		t.Fatalf("expected truncation exit status 255, got %d", es.StatusCode)
+	}
+}
+
+// PTY session (stage 1, bug 5): the remote shell exited and the exit status
+// arrived, but a raw console stdin never EOFs, so the server can keep the
+// channel open and never send the trailing EOF. The drain must give up after
+// the grace window instead of hanging forever.
+func TestPumpPtyExitDrainIsBounded(t *testing.T) {
+	fc := newFakeChannel()
+	fc.msgs <- exitStatusMsg(7)
+	fc.msgs <- dataMsg("bye")
+	// msgs is never closed: this server never ends the channel
+
+	pr, pw := io.Pipe() // raw console stdin: never EOFs
+	defer pw.Close()
+
+	var out, errBuf bytes.Buffer
+	start := time.Now()
+	err := pumpSessionStreams(fc, sessionIO{stdin: pr, stdout: &out, stderr: &errBuf}, true)
+	elapsed := time.Since(start)
+
+	var es ExitStatus
+	if !errors.As(err, &es) {
+		t.Fatalf("expected ExitStatus, got %v", err)
+	}
+	if es.StatusCode != 7 {
+		t.Fatalf("expected exit status 7, got %d", es.StatusCode)
+	}
+	if elapsed < 95*time.Millisecond {
+		t.Fatalf("drain returned after %v, before the %v grace window elapsed", elapsed, ptyExitGrace)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("drain returned after %v, grace window is %v", elapsed, ptyExitGrace)
+	}
+	if !strings.Contains(out.String(), "bye") {
+		t.Fatalf("stdout = %q, want the post-exit output %q drained", out.String(), "bye")
+	}
+	if strings.Contains(errBuf.String(), "truncated") {
+		t.Fatal("PTY sessions must not be classified as truncated transfers")
+	}
+}
+
+// A PTY client must FIN its send half when the exit status arrives: the
+// server only ends the channel after the client's send side closes, which a
+// raw console stdin never does on its own (stage 1, bug 5).
+func TestPumpPtyExitHalfClosesChannel(t *testing.T) {
+	fc := newFakeChannel()
+	fc.closeOnFin = true // cooperative server: ends the channel upon client FIN
+	fc.msgs <- exitStatusMsg(7)
+	fc.msgs <- dataMsg("tail")
+
+	pr, pw := io.Pipe()
+	defer pw.Close()
+
+	var out, errBuf bytes.Buffer
+	start := time.Now()
+	err := pumpSessionStreams(fc, sessionIO{stdin: pr, stdout: &out, stderr: &errBuf}, true)
+	elapsed := time.Since(start)
+
+	var es ExitStatus
+	if !errors.As(err, &es) || es.StatusCode != 7 {
+		t.Fatalf("expected exit status 7, got %v", err)
+	}
+	if !fc.closed.Load() {
+		t.Fatal("PTY exit status must half-close the channel (FIN)")
+	}
+	if elapsed >= 95*time.Millisecond {
+		t.Fatalf("a cooperative server must end the drain right after the FIN, took %v", elapsed)
+	}
+	if !strings.Contains(out.String(), "tail") {
+		t.Fatalf("stdout = %q, want %q", out.String(), "tail")
 	}
 }
