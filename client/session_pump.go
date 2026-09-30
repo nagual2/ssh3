@@ -66,6 +66,11 @@ func pumpSessionStreams(channel sessionChannel, sio sessionIO, ptyRequested bool
 	// remote command stopped consuming input early and the transfer was
 	// truncated (CTO task stage 1, bug 3).
 	var inputSent atomic.Bool
+	// set when the stdin pump failed to write to the channel: the truncation
+	// verdict then fires too, but the channel's send side is in an error
+	// state and must not be half-closed by the verdict (transient flow
+	// control failures must keep the channel open for the drain)
+	var writeFailed atomic.Bool
 	// closed on every return path of the stdin pump: an exit status that
 	// arrives while the pump is still running waits for it before deciding
 	// whether the transfer was truncated
@@ -80,6 +85,7 @@ func pumpSessionStreams(channel sessionChannel, sio sessionIO, ptyRequested bool
 				_, err2 := channel.WriteData(buf[:n], ssh3Messages.SSH_EXTENDED_DATA_NONE)
 				if err2 != nil {
 					fmt.Fprintf(sio.stderr, "could not write data on channel: %+v", err2)
+					writeFailed.Store(true)
 					return
 				}
 			}
@@ -138,6 +144,17 @@ func pumpSessionStreams(channel sessionChannel, sio sessionIO, ptyRequested bool
 					// forward a distinct local error instead of the remote's
 					// success status, which would mask the data loss
 					exitStatus = 255
+					// The remote command is gone, so no one will consume the
+					// pending input: half-close the send side so the server
+					// ends the stream and the drain below terminates. A
+					// server only FINs after the client does, so without
+					// this FIN a never-EOF stdin (CI/harness pipes) hangs
+					// the client forever (stage 1, bug 3 follow-up; see
+					// docs/BUG-STDIN-DRAIN-DEADLOCK.md). A failed stdin
+					// write must not half-close the channel.
+					if !writeFailed.Load() {
+						channel.Close()
+					}
 				}
 				// An exit status does not end the byte stream: command output
 				// may still be in flight, and the channel ends with a

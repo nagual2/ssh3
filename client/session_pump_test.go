@@ -181,6 +181,38 @@ func TestPumpTruncatedTransferDetected(t *testing.T) {
 	}
 }
 
+// Non-PTY truncated transfer with a never-EOF stdin: the client must FIN its
+// send half when the truncation verdict fires. A server only ends the channel
+// after the client's send side closes, so without the FIN the drain waits
+// forever and the process hangs (docs/BUG-STDIN-DRAIN-DEADLOCK.md).
+func TestPumpTruncatedTransferHalfClosesChannel(t *testing.T) {
+	fc := newFakeChannel()
+	fc.closeOnFin = true // cooperative server: ends the channel upon client FIN
+	fc.msgs <- exitStatusMsg(0)
+	// msgs is never closed: without the client FIN this server never ends the channel
+
+	pr, pw := io.Pipe() // harness-style stdin: never EOFs
+	defer pw.Close()
+
+	var out, errBuf bytes.Buffer
+	resCh := make(chan error, 1)
+	go func() {
+		resCh <- pumpSessionStreams(fc, sessionIO{stdin: pr, stdout: &out, stderr: &errBuf}, false)
+	}()
+	select {
+	case err := <-resCh:
+		var es ExitStatus
+		if !errors.As(err, &es) || es.StatusCode != 255 {
+			t.Fatalf("expected truncation exit status 255, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("client hung in the post-exit drain: no FIN was sent for a never-EOF stdin")
+	}
+	if !fc.closed.Load() {
+		t.Fatal("truncation verdict must half-close the channel (FIN)")
+	}
+}
+
 // PTY session (stage 1, bug 5): the remote shell exited and the exit status
 // arrived, but a raw console stdin never EOFs, so the server can keep the
 // channel open and never send the trailing EOF. The drain must give up after
