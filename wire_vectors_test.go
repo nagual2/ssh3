@@ -1,0 +1,108 @@
+package ssh3
+
+import (
+	"encoding/hex"
+	"fmt"
+	"net"
+	"testing"
+
+	"github.com/francoismichel/ssh3/message"
+	"github.com/francoismichel/ssh3/util"
+)
+
+// TestDumpWireVectors prints the canonical byte encoding of the SSH3 wire
+// structures the browser client re-implements in TypeScript. Run with
+//
+//	go test -run TestDumpWireVectors -v ./
+//
+// and paste the output into wasm-tunnel's test fixtures. The encoders are
+// unexported, so the dumper has to live in the root package.
+func TestDumpWireVectors(t *testing.T) {
+	dump := func(name string, b []byte) {
+		fmt.Printf("VECTOR %s = %s\n", name, hex.EncodeToString(b))
+	}
+
+	dump("varint_0", util.AppendVarInt(nil, 0))
+	dump("varint_1", util.AppendVarInt(nil, 1))
+	dump("varint_63", util.AppendVarInt(nil, 63))
+	dump("varint_64", util.AppendVarInt(nil, 64))
+	dump("varint_16383", util.AppendVarInt(nil, 16383))
+	dump("varint_16384", util.AppendVarInt(nil, 16384))
+	dump("varint_1073741823", util.AppendVarInt(nil, 1073741823))
+	dump("varint_1073741824", util.AppendVarInt(nil, 1073741824))
+	dump("varint_4611686018427387903", util.AppendVarInt(nil, 4611686018427387903))
+
+	dump("sshstring_empty", sshString(t, ""))
+	dump("sshstring_direct_tcp", sshString(t, "direct-tcp"))
+	dump("sshstring_exec", sshString(t, "exec"))
+	dump("sshstring_140", sshString(t, strings140()))
+
+	// Channel header for a direct-tcp channel towards an IPv4 target.
+	dump("channel_header_tcp_ipv4", buildHeader(
+		4, "direct-tcp", 30000,
+		buildForwardingChannelAdditionalBytes(net.ParseIP("192.0.2.10").To4(), 443),
+	))
+	// Same, but a large conversation stream id and an IPv6 target.
+	dump("channel_header_tcp_ipv6", buildHeader(
+		64, "direct-tcp", 65536,
+		buildForwardingChannelAdditionalBytes(net.ParseIP("2001:db8::1").To16(), 8443),
+	))
+	// UDP forwarding channel, same layout.
+	dump("channel_header_udp_ipv4", buildHeader(
+		8, "direct-udp", 30000,
+		buildForwardingChannelAdditionalBytes(net.ParseIP("192.0.2.10").To4(), 53),
+	))
+	// A plain session channel carries no address tail.
+	dump("channel_header_session", buildHeader(0, "session", 30000, nil))
+
+	dump("open_confirmation_30000", writeMessage(t, &message.ChannelOpenConfirmationMessage{MaxPacketSize: 30000}))
+	dump("open_failure", writeMessage(t, &message.ChannelOpenFailureMessage{
+		ReasonCode:       2,
+		ErrorMessageUTF8: "connection refused",
+		LanguageTag:      "",
+	}))
+	dump("channel_data", writeMessage(t, &message.DataOrExtendedDataMessage{
+		DataType: message.SSH_EXTENDED_DATA_NONE,
+		Data:     "hello",
+	}))
+	dump("channel_extended_data", writeMessage(t, &message.DataOrExtendedDataMessage{
+		DataType: message.SSH_EXTENDED_DATA_STDERR,
+		Data:     "err",
+	}))
+	// Zero-copy header: MarshalHeader(len) + payload must equal channel_data.
+	dump("channel_data_header_5", (&message.DataOrExtendedDataMessage{
+		DataType: message.SSH_EXTENDED_DATA_NONE,
+	}).MarshalHeader(5))
+	dump("channel_request_exec", writeMessage(t, &message.ChannelRequestMessage{
+		WantReply:      false,
+		ChannelRequest: &message.ExecRequest{Command: "uptime"},
+	}))
+}
+
+func strings140() string {
+	b := make([]byte, 140)
+	for i := range b {
+		b[i] = byte('a' + i%26)
+	}
+	return string(b)
+}
+
+func sshString(t *testing.T, s string) []byte {
+	t.Helper()
+	buf := make([]byte, util.SSHStringLen(s))
+	n, err := util.WriteSSHString(buf, s)
+	if err != nil {
+		t.Fatalf("WriteSSHString(%q): %v", s, err)
+	}
+	return buf[:n]
+}
+
+func writeMessage(t *testing.T, m message.Message) []byte {
+	t.Helper()
+	buf := make([]byte, m.Length()+64)
+	n, err := m.Write(buf)
+	if err != nil {
+		t.Fatalf("Write(%T): %v", m, err)
+	}
+	return buf[:n]
+}
