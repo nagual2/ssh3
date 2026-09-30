@@ -335,7 +335,21 @@ func execCmdInBackground(channel ssh3.Channel, user *unix_util.User, session *ru
 		type readResult struct {
 			data []byte
 			err  error
+			// raw is the pooled buffer backing data, returned to bufs by the
+			// consumer after WriteData; nil for a buffer the pool will never
+			// see again (reader error path).
+			raw *[]byte
 		}
+
+		// Pool of per-read buffers instead of two allocations + a copy per
+		// read (buf + out + copy showed up as memmove/GC pressure in the
+		// data-path profile, docs/PROFILE-2026-09-29.md): the reader hands
+		// ownership to the consumer, which returns the buffer after the
+		// channel write. At most two buffers are in flight per stream.
+		bufs := &sync.Pool{New: func() any {
+			b := make([]byte, channel.MaxPacketSize())
+			return &b
+		}}
 
 		stdoutChan := make(chan readResult, 1)
 		stderrChan := make(chan readResult, 1)
@@ -345,11 +359,9 @@ func execCmdInBackground(channel ssh3.Channel, user *unix_util.User, session *ru
 			defer close(stdoutChan)
 			if runningCommand.stdoutR != nil {
 				for {
-					buf := make([]byte, channel.MaxPacketSize())
-					n, err := runningCommand.stdoutR.Read(buf)
-					out := make([]byte, n)
-					copy(out, buf[:n])
-					stdoutChan <- readResult{data: out, err: err}
+					p := bufs.Get().(*[]byte)
+					n, err := runningCommand.stdoutR.Read(*p)
+					stdoutChan <- readResult{data: (*p)[:n], err: err, raw: p}
 					if err != nil {
 						return
 					}
@@ -360,11 +372,9 @@ func execCmdInBackground(channel ssh3.Channel, user *unix_util.User, session *ru
 			defer close(stderrChan)
 			if runningCommand.stderrR != nil {
 				for {
-					buf := make([]byte, channel.MaxPacketSize())
-					n, err := runningCommand.stderrR.Read(buf)
-					out := make([]byte, n)
-					copy(out, buf[:n])
-					stderrChan <- readResult{data: out, err: err}
+					p := bufs.Get().(*[]byte)
+					n, err := runningCommand.stderrR.Read(*p)
+					stderrChan <- readResult{data: (*p)[:n], err: err, raw: p}
 					if err != nil {
 						return
 					}
@@ -385,6 +395,9 @@ func execCmdInBackground(channel ssh3.Channel, user *unix_util.User, session *ru
 					buf, err := stdoutResult.data, stdoutResult.err
 					// an error could be returned but still with relevant data, so first send the data
 					_, err2 := channel.WriteData(buf, ssh3Messages.SSH_EXTENDED_DATA_NONE)
+					if stdoutResult.raw != nil {
+						bufs.Put(stdoutResult.raw)
+					}
 					if err2 != nil {
 						log.Error().Msgf("could not write the pty's output in an SSH message: %+v\n", err)
 						return
@@ -401,8 +414,11 @@ func execCmdInBackground(channel ssh3.Channel, user *unix_util.User, session *ru
 				} else {
 					buf, err := stderrResult.data, stderrResult.err
 					_, err2 := channel.WriteData(buf, ssh3Messages.SSH_EXTENDED_DATA_STDERR)
+					if stderrResult.raw != nil {
+						bufs.Put(stderrResult.raw)
+					}
 					if err2 != nil {
-						log.Error().Msgf("could not write the pty's output in an SSH message: %+v\n", err)
+						log.Error().Msgf("could not write the pty's error output in an SSH message: %+v\n", err)
 						return
 					}
 					if err != nil && !errors.Is(err, io.EOF) {
