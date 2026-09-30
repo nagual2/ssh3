@@ -50,7 +50,8 @@ require (
 
 go 1.26.0
 
-// Vendored from the sibling fork checkout (../quic-go, branch feat/io-uring-send
-// = upstream v0.63.0 + the io_uring send-path patch, behind QUIC_GO_IO_URING_SEND).
-// Regular builds use vendor/ and never resolve the replace path.
-replace github.com/quic-go/quic-go => ../quic-go
+// The io_uring send-path experiments live in the nagual2/quic-go fork
+// (branch feat/io-uring-send, upstream v0.63.0 + patch behind
+// QUIC_GO_IO_URING_SEND, benches verdict: parity with upstream).
+// Release builds use upstream quic-go; to run the experiments locally,
+// re-add: replace github.com/quic-go/quic-go => ../quic-go

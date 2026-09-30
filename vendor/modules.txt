@@ -103,7 +103,7 @@ github.com/pkg/sftp/internal/encoding/ssh/filexfer
 # github.com/quic-go/qpack v0.6.0
 ## explicit; go 1.24
 github.com/quic-go/qpack
-# github.com/quic-go/quic-go v0.63.0 => ../quic-go
+# github.com/quic-go/quic-go v0.63.0
 ## explicit; go 1.26.0
 github.com/quic-go/quic-go
 github.com/quic-go/quic-go/http3
@@ -111,7 +111,6 @@ github.com/quic-go/quic-go/http3/qlog
 github.com/quic-go/quic-go/internal/ackhandler
 github.com/quic-go/quic-go/internal/congestion
 github.com/quic-go/quic-go/internal/handshake
-github.com/quic-go/quic-go/internal/io_uring
 github.com/quic-go/quic-go/internal/monotime
 github.com/quic-go/quic-go/internal/protocol
 github.com/quic-go/quic-go/internal/qerr
@@ -295,4 +294,3 @@ google.golang.org/protobuf/types/gofeaturespb
 # gopkg.in/yaml.v3 v3.0.1
 ## explicit
 gopkg.in/yaml.v3
-# github.com/quic-go/quic-go => ../quic-go
