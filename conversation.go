@@ -27,8 +27,17 @@ func (cid ConversationID) String() string {
 	return base64.StdEncoding.EncodeToString(cid[:])
 }
 
+// controlStreamHandle is the surface of the conversation's control stream the
+// Conversation needs. On the client the control stream is an
+// *http3.RequestStream, on the server an *http3.Stream; both provide this
+// minimal API.
+type controlStreamHandle interface {
+	Close() error
+	StreamID() quic.StreamID
+}
+
 type Conversation struct {
-	controlStream             http3.Stream
+	controlStream             controlStreamHandle
 	maxPacketSize             uint64
 	defaultDatagramsQueueSize uint64
 	streamCreator             streamOpener
@@ -77,46 +86,41 @@ func NewClientConversation(maxPacketsize uint64, defaultDatagramsQueueSize uint6
 	return conv, nil
 }
 
-func (c *Conversation) EstablishClientConversation(req *http.Request, qconn quic.Connection, roundTripper *http3.RoundTripper, supportedVersions []Version) error {
+func (c *Conversation) EstablishClientConversation(req *http.Request, qconn *quic.Conn, transport *http3.Transport, supportedVersions []Version) error {
 
-	roundTripper.StreamHijacker = func(frameType http3.FrameType, _ quic.ConnectionTracingID, stream quic.Stream, err error) (bool, error) {
-		if err != nil {
-			return false, err
+	// quic-go v0.63 no longer spawns accept loops nor offers a StreamHijacker
+	// for raw connections: the application drives them itself, and it must do so
+	// before the request is sent so that the server's HTTP/3 control and QPACK
+	// unidirectional streams are consumed while the response headers are decoded.
+	rawConn := transport.NewRawClientConn(qconn)
+	connCtx := qconn.Context()
+	go func() {
+		for {
+			str, err := qconn.AcceptUniStream(connCtx)
+			if err != nil {
+				return
+			}
+			go rawConn.HandleUnidirectionalStream(str)
 		}
-		if frameType != SSH_FRAME_TYPE {
-			return false, nil
+	}()
+	// The server only opens bidirectional streams to expose SSH3 channels to the
+	// client (e.g. "agent-connection" for ssh-agent forwarding). They must be
+	// handled here: (*http3.ClientConn).HandleBidirectionalStream closes the
+	// whole connection with STREAM_CREATION_ERROR on any server-initiated
+	// bidirectional stream.
+	go func() {
+		for {
+			str, err := qconn.AcceptStream(connCtx)
+			if err != nil {
+				return
+			}
+			go c.handleIncomingChannelStream(str)
 		}
+	}()
 
-		controlStreamID, channelType, maxPacketSize, err := parseHeader(uint64(stream.StreamID()), &StreamByteReader{stream})
-		if err != nil {
-			return false, err
-		}
-		// todo: handle several conversations for the same client on the same connection ?
-		// This can be done by defining the conversation ID as a combination between the control stream ID
-		// and the tls exporter value, or computing the exporter value depending on the stream ID
-		if controlStreamID != uint64(c.controlStream.StreamID()) {
-			err := fmt.Errorf("wrong conversation control stream ID: %d instead of expected %d", controlStreamID, c.controlStream.StreamID())
-			log.Error().Msgf("%s", err)
-			return false, err
-		}
-		channelInfo := &ChannelInfo{
-			ConversationID:       c.ConversationID(),
-			ConversationStreamID: controlStreamID,
-			ChannelID:            uint64(stream.StreamID()),
-			ChannelType:          channelType,
-			MaxPacketSize:        maxPacketSize,
-		}
+	cc := rawConn.ClientConn
 
-		newChannel := NewChannel(channelInfo.ConversationStreamID, channelInfo.ConversationID, uint64(stream.StreamID()), channelInfo.ChannelType, channelInfo.MaxPacketSize, &StreamByteReader{stream}, stream, nil, c.channelsManager, false, false, true, c.defaultDatagramsQueueSize, nil)
-		newChannel.setDatagramSender(c.getDatagramSenderForChannel(newChannel.ChannelID()))
-		c.channelsAcceptQueue.Add(newChannel)
-		return true, nil
-	}
-
-	// the StreamHijacker above is picked up when the client conn is created
-	cc := roundTripper.NewClientConn(qconn)
-
-	doReq := func(version Version, req *http.Request) (*http.Response, http3.Stream, Version, error) {
+	doReq := func(version Version, req *http.Request) (*http.Response, *http3.RequestStream, Version, error) {
 		req.Header.Set("User-Agent", version.GetVersionString())
 		log.Debug().Msgf("send %s request on URL %s, User-Agent=\"%s\"", req.Method, req.URL, req.Header.Get("User-Agent"))
 		// the v0.49 http3 client API: the extended-CONNECT stream is opened
@@ -193,7 +197,7 @@ func (c *Conversation) EstablishClientConversation(req *http.Request, qconn quic
 				serverVersion.GetProtocolVersion(), ThisVersion().GetProtocolVersion())
 		}
 		c.controlStream = controlStream
-		// quic.Connection satisfies the streamOpener facade and provides the
+		// *quic.Conn satisfies the streamOpener facade and provides the
 		// quic-level datagram API the loop below needs
 		c.streamCreator = qconn
 		c.messageSender = qconn
@@ -246,13 +250,70 @@ func (c *Conversation) EstablishClientConversation(req *http.Request, qconn quic
 	}
 }
 
-func NewServerConversation(ctx context.Context, controlStream http3.Stream, qconn http3.Connection, messageSender util.DatagramSender, maxPacketsize uint64, peerVersion Version) (*Conversation, error) {
+// handleIncomingChannelStream processes a server-initiated SSH3 channel
+// stream, formerly handled by the v0.49 RoundTripper.StreamHijacker. The first
+// QUIC varint of the stream must be the SSH3 frame type; the stream is
+// consumed from its beginning, unlike the v0.49 hijacker which received the
+// stream with the frame type already parsed by http3.
+func (c *Conversation) handleIncomingChannelStream(stream *quic.Stream) {
+	frameType, err := util.ReadVarInt(&StreamByteReader{stream})
+	if err != nil {
+		log.Error().Msgf("could not read frame type of incoming stream %d: %s", uint64(stream.StreamID()), err)
+		return
+	}
+	if frameType != SSH_FRAME_TYPE {
+		log.Error().Msgf("bad frame type %d on incoming stream %d, canceling stream", frameType, uint64(stream.StreamID()))
+		stream.CancelRead(quic.StreamErrorCode(0))
+		stream.CancelWrite(quic.StreamErrorCode(0))
+		return
+	}
+	if c.controlStream == nil {
+		// cannot happen with valid peers: the server only opens channels after
+		// answering the CONNECT request, and the control stream is registered
+		// before that. Keep the old hijacker's assumption explicit instead of
+		// panicking on a nil dereference.
+		log.Error().Msgf("received channel on stream %d before the conversation was established, canceling stream", uint64(stream.StreamID()))
+		stream.CancelRead(quic.StreamErrorCode(0))
+		stream.CancelWrite(quic.StreamErrorCode(0))
+		return
+	}
+
+	controlStreamID, channelType, maxPacketSize, err := parseHeader(uint64(stream.StreamID()), &StreamByteReader{stream})
+	if err != nil {
+		log.Error().Msgf("could not parse channel header on stream %d: %s", uint64(stream.StreamID()), err)
+		return
+	}
+	// todo: handle several conversations for the same client on the same connection ?
+	// This can be done by defining the conversation ID as a combination between the control stream ID
+	// and the tls exporter value, or computing the exporter value depending on the stream ID
+	if controlStreamID != uint64(c.controlStream.StreamID()) {
+		err := fmt.Errorf("wrong conversation control stream ID: %d instead of expected %d", controlStreamID, c.controlStream.StreamID())
+		log.Error().Msgf("%s", err)
+		stream.CancelRead(quic.StreamErrorCode(0))
+		stream.CancelWrite(quic.StreamErrorCode(0))
+		return
+	}
+	channelInfo := &ChannelInfo{
+		ConversationID:       c.ConversationID(),
+		ConversationStreamID: controlStreamID,
+		ChannelID:            uint64(stream.StreamID()),
+		ChannelType:          channelType,
+		MaxPacketSize:        maxPacketSize,
+	}
+
+	newChannel := NewChannel(channelInfo.ConversationStreamID, channelInfo.ConversationID, uint64(stream.StreamID()), channelInfo.ChannelType, channelInfo.MaxPacketSize, stream, stream, nil, c.channelsManager, false, false, true, c.defaultDatagramsQueueSize, nil)
+	newChannel.setDatagramSender(c.getDatagramSenderForChannel(newChannel.ChannelID()))
+	c.channelsAcceptQueue.Add(newChannel)
+}
+
+func NewServerConversation(ctx context.Context, controlStream *http3.Stream, qconn *quic.Conn, messageSender util.DatagramSender, maxPacketsize uint64, peerVersion Version) (*Conversation, error) {
 	backgroundContext, backgroundCancelFunc := context.WithCancelCause(ctx)
 
 	tls := qconn.ConnectionState().TLS
 	convID, err := GenerateConversationID(&tls)
 	if err != nil {
 		log.Error().Msgf("could not generate conversation ID on server")
+		backgroundCancelFunc(nil)
 		return nil, err
 	}
 
@@ -272,11 +333,11 @@ func NewServerConversation(ctx context.Context, controlStream http3.Stream, qcon
 }
 
 type StreamByteReader struct {
-	quic.Stream
+	*quic.Stream
 }
 
-// rawQUICConn is the quic-level connection behind the http3.Connection facade:
-// ssh3 needs its datagram and context methods, which the facade does not expose.
+// rawQUICConn is the quic-level connection surface the Conversation needs for
+// datagrams and context management; *quic.Conn provides it on both sides.
 type rawQUICConn interface {
 	ReceiveDatagram(ctx context.Context) ([]byte, error)
 	SendDatagram(b []byte) error
@@ -284,10 +345,9 @@ type rawQUICConn interface {
 }
 
 // streamOpener is the slice of the connection the Conversation needs to open
-// new channels: both quic.Connection (client) and http3.Connection (server)
-// satisfy it.
+// new channels: *quic.Conn satisfies it on both the client and the server.
 type streamOpener interface {
-	OpenStream() (quic.Stream, error)
+	OpenStream() (*quic.Stream, error)
 }
 
 func (r *StreamByteReader) ReadByte() (byte, error) {
@@ -304,7 +364,7 @@ func (c *Conversation) OpenChannel(channelType string, maxPacketSize uint64, dat
 	if err != nil {
 		return nil, err
 	}
-	channel := NewChannel(uint64(c.controlStream.StreamID()), c.conversationID, uint64(str.StreamID()), channelType, maxPacketSize, &StreamByteReader{str}, str, nil, c.channelsManager, true, true, false, datagramsQueueSize, nil)
+	channel := NewChannel(uint64(c.controlStream.StreamID()), c.conversationID, uint64(str.StreamID()), channelType, maxPacketSize, str, str, nil, c.channelsManager, true, true, false, datagramsQueueSize, nil)
 	c.channelsManager.addChannel(channel)
 	return channel, nil
 }
@@ -317,7 +377,7 @@ func (c *Conversation) OpenUDPForwardingChannel(maxPacketSize uint64, datagramsQ
 	}
 	additionalBytes := buildForwardingChannelAdditionalBytes(remoteAddr.IP, uint16(remoteAddr.Port))
 
-	channel := NewChannel(uint64(c.controlStream.StreamID()), c.conversationID, uint64(str.StreamID()), "direct-udp", maxPacketSize, &StreamByteReader{str}, str, nil, c.channelsManager, true, true, false, datagramsQueueSize, additionalBytes)
+	channel := NewChannel(uint64(c.controlStream.StreamID()), c.conversationID, uint64(str.StreamID()), "direct-udp", maxPacketSize, str, str, nil, c.channelsManager, true, true, false, datagramsQueueSize, additionalBytes)
 	channel.setDatagramSender(c.getDatagramSenderForChannel(channel.ChannelID()))
 	channel.maybeSendHeader()
 	c.channelsManager.addChannel(channel)
@@ -332,7 +392,7 @@ func (c *Conversation) OpenTCPForwardingChannel(maxPacketSize uint64, datagramsQ
 	}
 	additionalBytes := buildForwardingChannelAdditionalBytes(remoteAddr.IP, uint16(remoteAddr.Port))
 
-	channel := NewChannel(uint64(c.controlStream.StreamID()), c.conversationID, uint64(str.StreamID()), "direct-tcp", maxPacketSize, &StreamByteReader{str}, str, nil, c.channelsManager, true, true, false, datagramsQueueSize, additionalBytes)
+	channel := NewChannel(uint64(c.controlStream.StreamID()), c.conversationID, uint64(str.StreamID()), "direct-tcp", maxPacketSize, str, str, nil, c.channelsManager, true, true, false, datagramsQueueSize, additionalBytes)
 	channel.maybeSendHeader()
 	c.channelsManager.addChannel(channel)
 	return &TCPForwardingChannelImpl{Channel: channel, RemoteAddr: remoteAddr}, nil
@@ -384,7 +444,7 @@ func (c *Conversation) Close() {
 // the streams (e.g. command output followed by the exit status) before the
 // forced close; the timeout only bounds a peer that never goes away.
 func (c *Conversation) DrainAndClose(drain time.Duration) {
-	if qconn, ok := c.streamCreator.(quic.Connection); ok {
+	if qconn, ok := c.streamCreator.(*quic.Conn); ok {
 		select {
 		case <-qconn.Context().Done():
 			// the peer closed the connection: everything deliverable has been

@@ -33,7 +33,7 @@ var (
 
 // dialLikeSSH3 reproduces the ssh3 client socket creation: a dual-stack
 // net.ListenUDP("udp", nil) passed to quic.Dial.
-func dialLikeSSH3(ctx context.Context, tlsConf *tls.Config) (quic.Connection, error) {
+func dialLikeSSH3(ctx context.Context, tlsConf *tls.Config) (*quic.Conn, error) {
 	udpConn, err := net.ListenUDP("udp", nil)
 	if err != nil {
 		return nil, err
@@ -105,7 +105,7 @@ func runClient(ctx context.Context) error {
 		InsecureSkipVerify: true, // self-signed bench certificate
 		NextProtos:         []string{"quic-bench"},
 	}
-	var conn quic.Connection
+	var conn *quic.Conn
 	var err error
 	if *dialmode == "conn" {
 		conn, err = dialLikeSSH3(ctx, tlsConf)

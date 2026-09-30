@@ -101,7 +101,7 @@ type channelImpl struct {
 
 	channelCloseListener
 
-	recv           quic.ReceiveStream
+	recv           *quic.Stream
 	send           io.WriteCloser
 	datagramsQueue *util.DatagramsQueue
 	PtyReqHandler
@@ -228,7 +228,7 @@ func parseTCPForwardingHeader(channelID uint64, buf util.Reader) (*net.TCPAddr, 
 	}, nil
 }
 
-func NewChannel(conversationStreamID uint64, conversationID ConversationID, channelID uint64, channelType string, maxPacketSize uint64, recv quic.ReceiveStream,
+func NewChannel(conversationStreamID uint64, conversationID ConversationID, channelID uint64, channelType string, maxPacketSize uint64, recv *quic.Stream,
 	send io.WriteCloser, datagramSender util.SSH3DatagramSenderFunc, channelCloseListener channelCloseListener, sendHeader bool, confirmSent bool,
 	confirmReceived bool, datagramsQueueSize uint64, additonalHeaderBytes []byte) Channel {
 	var header []byte = nil

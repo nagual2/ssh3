@@ -4,7 +4,7 @@ import (
 	"sync"
 
 	"github.com/francoismichel/ssh3/util"
-	"github.com/quic-go/quic-go/http3"
+	"github.com/quic-go/quic-go"
 	"github.com/rs/zerolog/log"
 )
 
@@ -15,12 +15,12 @@ const danglingDatagramQueueSize = 64
 type ControlStreamID = uint64
 
 type conversationsManager struct {
-	connection    http3.Connection
+	connection    *quic.Conn
 	conversations map[ControlStreamID]*Conversation
 	lock          sync.Mutex
 }
 
-func newConversationManager(connection http3.Connection) *conversationsManager {
+func newConversationManager(connection *quic.Conn) *conversationsManager {
 	return &conversationsManager{connection: connection, conversations: make(map[ControlStreamID]*Conversation)}
 }
 

@@ -98,21 +98,21 @@ func run() int {
 			return
 		}
 
-		hijacker, ok := w.(http3.Hijacker)
+		// quic-go v0.63 removed http3.Hijacker: the QUIC connection is retrieved
+		// from the request context, where the http3.Server.ConnContext hook set
+		// up by ssh3.NewServer put it
+		qconn, ok := ssh3.QuicConnFromContext(r.Context())
 		if !ok {
-			http.Error(w, "http3 hijacker unavailable", http.StatusInternalServerError)
+			http.Error(w, "http3 conn unavailable", http.StatusInternalServerError)
 			return
 		}
-
-		streamCreator := hijacker.Connection()
-		qconn := streamCreator.(quic.Connection)
 		if !qconn.ConnectionState().TLS.HandshakeComplete {
 			fmt.Fprintln(os.Stderr, "unauthorized: TLS handshake incomplete")
 			w.WriteHeader(http.StatusTooEarly)
 			return
 		}
 
-		streamer, ok := r.Body.(http3.HTTPStreamer)
+		streamer, ok := w.(http3.HTTPStreamer)
 		if !ok {
 			http.Error(w, "http3 stream unavailable", http.StatusInternalServerError)
 			return
@@ -120,7 +120,7 @@ func run() int {
 		conv, err := ssh3.NewServerConversation(
 			context.Background(),
 			streamer.HTTPStream(),
-			streamCreator,
+			qconn,
 			qconn,
 			30_000,
 			peerVersion,
@@ -176,6 +176,9 @@ func run() int {
 	})
 	server.Handler = mux
 
+	// quic-go v0.63 removed StreamHijacker: accept QUIC connections here so the
+	// ssh3 server can drive the HTTP/3 accept loops and dispatch SSH3 channel
+	// streams itself
 	packetConn, err := net.ListenPacket("udp", bindAddr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "could not bind %s: %s\n", bindAddr, err)
@@ -183,12 +186,29 @@ func run() int {
 	}
 	defer packetConn.Close()
 
-	fmt.Printf("READY %s\n", packetConn.LocalAddr().String())
-	if err := server.Serve(packetConn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	listener, err := quic.ListenEarly(packetConn, server.TLSConfig, server.QUICConfig)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "go interop server failed: %s\n", err)
 		return 1
 	}
-	return 0
+
+	fmt.Printf("READY %s\n", listener.Addr().String())
+	for {
+		qconn, err := listener.Accept(context.Background())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "go interop server failed: %s\n", err)
+			return 1
+		}
+		go func() {
+			hconn, err := server.NewRawServerConn(qconn)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "go interop server failed: %s\n", err)
+				qconn.CloseWithError(quic.ApplicationErrorCode(0), "internal error")
+				return
+			}
+			ssh3Server.ServeQUICConn(context.Background(), qconn, hconn)
+		}()
+	}
 }
 
 func requestUsername(r *http.Request, fallback string) string {

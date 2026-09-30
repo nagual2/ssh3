@@ -817,6 +817,7 @@ func openAgentSocketAndForwardAgent(parent context.Context, conv *ssh3.Conversat
 	ctx, cancel := context.WithCancelCause(parent)
 	sockPath, err := unix_util.NewUnixSocketPath()
 	if err != nil {
+		cancel(err)
 		return "", err
 	}
 
@@ -824,6 +825,7 @@ func openAgentSocketAndForwardAgent(parent context.Context, conv *ssh3.Conversat
 	agentSock, err := listener.Listen(ctx, "unix", sockPath)
 	if err != nil {
 		log.Error().Msgf("could not listen on agent socket: %s", err.Error())
+		cancel(err)
 		return "", err
 	}
 
@@ -831,11 +833,13 @@ func openAgentSocketAndForwardAgent(parent context.Context, conv *ssh3.Conversat
 	err = os.Chown(sockDir, int(user.Uid), int(user.Gid))
 	if err != nil {
 		log.Error().Msgf("could chown the directory of the listening socket at %s: %s", sockPath, err.Error())
+		cancel(err)
 		return "", err
 	}
 	err = os.Chown(sockPath, int(user.Uid), int(user.Gid))
 	if err != nil {
 		log.Error().Msgf("could chown the listening socket at %s: %s", sockPath, err.Error())
+		cancel(err)
 		return "", err
 	}
 
@@ -1168,12 +1172,32 @@ func ServerMain() int {
 	outputMessage := fmt.Sprintf("Server started, listening on %s%s", *bindAddr, *urlPath)
 	fmt.Fprintln(os.Stderr, outputMessage)
 	log.Info().Msg(outputMessage)
-	err = server.ListenAndServe()
 
+	// quic-go v0.63 removed http3.Server.StreamHijacker, so the http3 server
+	// can no longer dispatch foreign (SSH3 channel) streams itself. Accept QUIC
+	// connections here and let the ssh3 server drive the HTTP/3 accept loops,
+	// dispatching SSH3 channel streams in its own accept loop.
+	listener, err := quic.ListenAddrEarly(*bindAddr, http3.ConfigureTLSConfig(tlsConfig), quicConf)
 	if err != nil {
-		log.Error().Msgf("error while serving HTTP connection: %s", err)
+		log.Error().Msgf("error while starting the QUIC listener: %s", err)
 		return -1
 	}
-
-	return 0
+	for {
+		qconn, err := listener.Accept(context.Background())
+		if err != nil {
+			log.Error().Msgf("error while accepting a QUIC connection: %s", err)
+			return -1
+		}
+		go func() {
+			hconn, err := server.NewRawServerConn(qconn)
+			if err != nil {
+				log.Error().Msgf("could not create the HTTP/3 connection: %s", err)
+				qconn.CloseWithError(quic.ApplicationErrorCode(0), "internal error")
+				return
+			}
+			if err := ssh3Server.ServeQUICConn(context.Background(), qconn, hconn); err != nil {
+				log.Debug().Msgf("QUIC connection closed: %s", err)
+			}
+		}()
+	}
 }
