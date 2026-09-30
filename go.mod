@@ -10,14 +10,14 @@ require (
 	github.com/onsi/ginkgo/v2 v2.13.0
 	github.com/onsi/gomega v1.29.0
 	github.com/pkg/sftp v1.13.7
-	github.com/quic-go/quic-go v0.49.0
+	github.com/quic-go/quic-go v0.63.0
 	github.com/rs/zerolog v1.31.0
 	go.uber.org/zap v1.24.0
-	golang.org/x/crypto v0.26.0
+	golang.org/x/crypto v0.54.0
 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842
 	golang.org/x/oauth2 v0.13.0
-	golang.org/x/sys v0.23.0
-	golang.org/x/term v0.23.0
+	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 )
 
 require (
@@ -34,21 +34,23 @@ require (
 	github.com/mattn/go-isatty v0.0.19 // indirect
 	github.com/mholt/acmez v1.2.0 // indirect
 	github.com/miekg/dns v1.1.55 // indirect
-	github.com/quic-go/qpack v0.5.1 // indirect
+	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/zeebo/blake3 v0.2.3 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
-	go.uber.org/mock v0.5.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/mod v0.18.0 // indirect
-	golang.org/x/net v0.28.0 // indirect
-	golang.org/x/sync v0.8.0 // indirect
-	golang.org/x/text v0.17.0 // indirect
-	golang.org/x/tools v0.22.0 // indirect
+	golang.org/x/mod v0.37.0 // indirect
+	golang.org/x/net v0.56.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/tools v0.47.0 // indirect
 	google.golang.org/appengine v1.6.8 // indirect
 	google.golang.org/protobuf v1.33.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-go 1.22
+go 1.26.0
 
-toolchain go1.22.2
+// Vendored from the sibling fork checkout (../quic-go, branch feat/io-uring-send
+// = upstream v0.63.0 + the io_uring send-path patch, behind QUIC_GO_IO_URING_SEND).
+// Regular builds use vendor/ and never resolve the replace path.
+replace github.com/quic-go/quic-go => ../quic-go
