@@ -1,3 +1,6 @@
 /bin/
 /target/
 dist/
+
+# local-only bug briefs (real LAN addresses, never publish)
+docs/BUG-*.md
