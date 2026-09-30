@@ -76,7 +76,7 @@ fi
 # --- 1. Payload ------------------------------------------------------------
 SIZE_MB="$SIZE_MB" bash "$BENCH_DIR/genfile.sh"
 bench::log "pushing payload to remote (for pull scenarios)"
-cat "$LOCAL_FILE" | bench::exec_remote "$SSH3_CMD" "mkdir -p '$REMOTE_DIR' && cat > '$REMOTE_DIR/payload.bin'"
+cat "$LOCAL_FILE" | bench::exec_remote_stdin "$SSH3_CMD" "mkdir -p '$REMOTE_DIR' && cat > '$REMOTE_DIR/payload.bin'"
 if has_tr ssh2; then
     [ "$(bench::remote_sha "$SSH2_CMD" "$REMOTE_DIR/payload.bin")" = "$(bench::local_sha "$LOCAL_FILE")" ] \
         || bench::die "remote payload sha mismatch (via ssh2)"

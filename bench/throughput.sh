@@ -68,7 +68,7 @@ if [ "$DIR" = "pull" ]; then
     if [ "$RSHA" != "$REF_SHA" ]; then
         [ "$SETUP_REMOTE" = "1" ] || bench::die "remote payload missing/mismatched; rerun with --setup-remote"
         bench::log "uploading payload to remote (one-time)..."
-        cat "$LOCAL_FILE" | bench::exec_remote "$CLIENT_CMD" "cat > '$REMOTE_DIR/payload.bin'"
+        cat "$LOCAL_FILE" | bench::exec_remote_stdin "$CLIENT_CMD" "cat > '$REMOTE_DIR/payload.bin'"
         RSHA="$(bench::remote_sha "$CLIENT_CMD" "$REMOTE_DIR/payload.bin")"
         [ "$RSHA" = "$REF_SHA" ] || bench::die "remote payload sha mismatch after upload"
     fi
@@ -81,7 +81,7 @@ run_once() { # $1 = run index; echoes elapsed ns on stdout, returns 0 on success
     case "$TRANSPORT:$MECH:$DIR" in
     *:pipe:push)
         for ((j = 1; j <= K; j++)); do
-            cat "$LOCAL_FILE" | bench::exec_remote "$CLIENT_CMD" "cat > '$REMOTE_DIR/out.$i.$j'" &
+            cat "$LOCAL_FILE" | bench::exec_remote_stdin "$CLIENT_CMD" "cat > '$REMOTE_DIR/out.$i.$j'" &
         done
         wait || rc=1
         ;;

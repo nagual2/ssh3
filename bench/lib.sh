@@ -60,7 +60,19 @@ bench::ssh3_cmd() {
 }
 
 # Run a remote command: exec_remote "<client cmd>" "<remote cmd>".
+# Stdin is closed on purpose: command execution never streams input. With an
+# inherited (possibly never-EOF) pipe the ssh3 client keeps its stdin pump
+# alive and, after a fast remote exit, deadlocks in the post-exit drain
+# waiting for a server FIN that only follows a client FIN (see
+# docs/BUG-STDIN-DRAIN-DEADLOCK.md). Payload streaming goes through
+# bench::exec_remote_stdin.
 bench::exec_remote() {
+    eval "$1 $(printf '%q' "$2")" </dev/null
+}
+
+# Run a remote command with the caller's stdin passed through: for piped
+# payload/tar streams (cat payload | exec_remote_stdin "cat > file").
+bench::exec_remote_stdin() {
     eval "$1 $(printf '%q' "$2")"
 }
 

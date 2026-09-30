@@ -59,7 +59,7 @@ run_tar() { # $1 = run index; echoes elapsed ns
     local i="$1" t0 t1 rc=0
     t0=$(date +%s%N)
     tar -C "$MANY_DIR" -cf - files |
-        bench::exec_remote "$CLIENT_CMD" "rm -rf '$RBASE' && mkdir -p '$RBASE' && tar xf - -C '$RBASE'" || rc=1
+        bench::exec_remote_stdin "$CLIENT_CMD" "rm -rf '$RBASE' && mkdir -p '$RBASE' && tar xf - -C '$RBASE'" || rc=1
     t1=$(date +%s%N)
     echo $((t1 - t0))
     return $rc
