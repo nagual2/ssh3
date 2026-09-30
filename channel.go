@@ -329,12 +329,10 @@ func (c *channelImpl) WriteData(dataBuf []byte, dataType ssh3.SSHDataType) (int,
 		// showed up as memmove/GC pressure in the data-path profile
 		// (docs/PROFILE-2026-09-29.md); the byte stream is identical
 		hdr := dataMsg.MarshalHeader(uint64(msgLen))
-		n, err := c.send.Write(hdr)
-		written += n
-		if err != nil {
+		if _, err := c.send.Write(hdr); err != nil {
 			return written, err
 		}
-		n, err = c.send.Write(chunk)
+		n, err := c.send.Write(chunk)
 		written += n
 		if err != nil {
 			return written, err
