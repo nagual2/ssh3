@@ -117,7 +117,7 @@ Increments (TDD, each independently shippable):
 
 | # | Increment | Acceptance |
 |---|-----------|------------|
-| 1 | Session pump refactor over `io.ReadWriteCloser` | no behavior change; existing suites green |
+| 1 | Session pump refactor over `io.ReadWriteCloser` (**done 2026-09-30**: `client/session.go` — `SessionSpec`/`PtySpec`, `OpenSession`, `PumpSession`; RunSession keeps console concerns; suites green, live exec/pty smoke byte-exact) | no behavior change; existing suites green |
 | 2 | Mux framing codec | unit tests: round-trip, version mismatch, garbage input |
 | 3 | Master + slave session bridging | integration test on loopback: slave session executes through master |
 | 4 | `ControlPersist`, idle timeout, `-O exit` control ops | master survives client exit; clean teardown |

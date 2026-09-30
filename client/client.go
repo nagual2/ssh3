@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
 	"syscall"
 	"time"
 
@@ -500,56 +499,18 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 
 	ctx := c.Context()
 
-	channel, err := c.OpenChannel("session", 30000, 0)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Could not open channel: %+v", err)
-		os.Exit(-1)
-	}
-
-	log.Debug().Msgf("opened new session channel")
-
-	if forwardSSHAgent {
-		_, err := channel.WriteData([]byte("forward-agent"), ssh3Messages.SSH_EXTENDED_DATA_NONE)
-		if err != nil {
-			log.Error().Msgf("could not forward agent: %s", err.Error())
-			return err
-		}
-		go func() {
-			for {
-				forwardChannel, err := c.AcceptChannel(ctx)
-				if err != nil {
-					if err != context.Canceled {
-						log.Error().Msgf("could not accept forwarding channel: %s", err.Error())
-					}
-					return
-				} else if forwardChannel.ChannelType() != "agent-connection" {
-					log.Error().Msgf("unexpected server-initiated channel: %s", channel.ChannelType())
-					return
-				}
-				log.Debug().Msg("new agent connection, forwarding")
-				go func() {
-					err = forwardAgent(ctx, forwardChannel)
-					if err != nil {
-						log.Error().Msgf("agent forwarding error: %s", err.Error())
-						c.Close()
-					}
-				}()
-			}
-		}()
-	}
-
+	// console inspection comes first: the pty request mirrors the local
+	// terminal, and raw-mode/signal forwarding below needs isATTY/hasWinSize
+	spec := SessionSpec{Command: command, ForwardAgent: forwardSSHAgent}
+	isATTY, hasWinSize := false, false
 	// A PTY session is interactive: its stdin never "finishes" while the user
 	// keeps the session open, so an exit status arriving with input still
 	// pending is the normal end of the session, not a truncated pipe transfer.
-	ptyRequested := false
-
 	if len(command) == 0 {
-		// avoid requesting a pty on the other side if stdin is not a pty
-		// similar behaviour to OpenSSH
-		isATTY := term.IsTerminal(int(tty.Fd()))
+		isATTY = term.IsTerminal(int(tty.Fd()))
 
 		windowSize, err := winsize.GetWinsize(tty)
-		hasWinSize := err == nil
+		hasWinSize = err == nil
 		if isATTY && !hasWinSize {
 			// some Windows consoles do not expose a queryable size via stdin:
 			// a PTY with a default geometry still beats a raw-pipe session
@@ -565,71 +526,43 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 				// remote ncurses programs expect a terminal type to be set
 				termType = "xterm"
 			}
-			err = channel.SendRequest(
-				&ssh3Messages.ChannelRequestMessage{
-					WantReply: true,
-					ChannelRequest: &ssh3Messages.PtyRequest{
-						Term:        termType,
-						CharWidth:   uint64(windowSize.NCols),
-						CharHeight:  uint64(windowSize.NRows),
-						PixelWidth:  uint64(windowSize.PixelWidth),
-						PixelHeight: uint64(windowSize.PixelHeight),
-					},
-				},
-			)
-
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Could send pty request: %+v", err)
-				return err
-			}
-			ptyRequested = true
-			log.Debug().Msgf("sent pty request for session")
-		}
-
-		err = channel.SendRequest(
-			&ssh3Messages.ChannelRequestMessage{
-				WantReply:      true,
-				ChannelRequest: &ssh3Messages.ShellRequest{},
-			},
-		)
-		if err != nil {
-			log.Error().Msgf("could not send shell request: %s", err)
-			return err
-		}
-		log.Debug().Msgf("sent shell request, hasWinSize = %t", hasWinSize)
-		// avoid making the terminal raw if stdin is not a TTY
-		// similar behaviour to OpenSSH
-		if isATTY {
-			fd := os.Stdin.Fd()
-			oldState, err := term.MakeRaw(int(fd))
-			if err != nil {
-				log.Warn().Msgf("cannot make tty raw: %s", err)
-			} else {
-				defer term.Restore(int(fd), oldState)
-			}
-			// full-screen remote apps (vim, mc) speak ANSI: the local console
-			// must interpret escape sequences too
-			defer enableConsoleVT()()
-			go forwardSessionSignals(ctx, channel)
-			if hasWinSize {
-				go forwardWindowChanges(ctx, channel, tty)
+			spec.Pty = &PtySpec{
+				Term:        termType,
+				Columns:     uint64(windowSize.NCols),
+				Rows:        uint64(windowSize.NRows),
+				PixelWidth:  uint64(windowSize.PixelWidth),
+				PixelHeight: uint64(windowSize.PixelHeight),
 			}
 		}
-	} else {
-		channel.SendRequest(
-			&ssh3Messages.ChannelRequestMessage{
-				WantReply: true,
-				ChannelRequest: &ssh3Messages.ExecRequest{
-					Command: strings.Join(command, " "),
-				},
-			},
-		)
-		log.Debug().Msgf("sent exec request for command \"%s\"", strings.Join(command, " "))
 	}
 
+	channel, ptyRequested, err := c.OpenSession(ctx, spec)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Could send shell request: %+v", err)
+		if channel == nil {
+			fmt.Fprintf(os.Stderr, "Could not open channel: %+v", err)
+			os.Exit(-1)
+		}
 		return err
+	}
+
+	// avoid making the terminal raw if stdin is not a TTY
+	// similar behaviour to OpenSSH; the pty/shell requests are already on
+	// the wire at this point
+	if len(command) == 0 && isATTY {
+		fd := os.Stdin.Fd()
+		oldState, err := term.MakeRaw(int(fd))
+		if err != nil {
+			log.Warn().Msgf("cannot make tty raw: %s", err)
+		} else {
+			defer term.Restore(int(fd), oldState)
+		}
+		// full-screen remote apps (vim, mc) speak ANSI: the local console
+		// must interpret escape sequences too
+		defer enableConsoleVT()()
+		go forwardSessionSignals(ctx, channel)
+		if hasWinSize {
+			go forwardWindowChanges(ctx, channel, tty)
+		}
 	}
 
 	// A trailing carriage return restores the prompt position after an
@@ -640,12 +573,8 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 	}
 
 	// drive the session with the process stdio; a ControlMaster (stage 3.5)
-	// bridges other pipes into the same pump
-	err = pumpSessionStreams(channel, sessionIO{
-		stdin:  os.Stdin,
-		stdout: os.Stdout,
-		stderr: os.Stderr,
-	}, ptyRequested)
+	// bridges other pipes into the same pump via PumpSession
+	err = c.PumpSession(channel, os.Stdin, os.Stdout, os.Stderr, ptyRequested)
 	if err == nil {
 		return nil
 	}
