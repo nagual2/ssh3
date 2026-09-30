@@ -10,7 +10,7 @@
 # is fully exercised.
 #
 #   Sanity : exec exit status (B4-lite) - base transport must work first.
-#   B10 TCP: greeting on the return path, then a SIZE_MB urandom blob through
+#   B10 TCP: greeting on the return path, then a FWD_SIZE_MB urandom blob through
 #            -forward-tcp; sink captures it, sha256 verified.
 #   B11 UDP: UDP_DATAGRAMS distinct datagrams through -forward-udp against an
 #            echo service; every echo must match byte-for-byte.
@@ -20,7 +20,7 @@ BENCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$BENCH_DIR/lib.sh"
 
-STAND="" SIZE_MB="${SIZE_MB:-1}"
+STAND="" FWD_SIZE_MB=1
 UDP_DATAGRAMS=20
 TCP_LOCAL=13456 TCP_REMOTE=19999
 UDP_LOCAL=13455 UDP_REMOTE=19998
@@ -30,7 +30,7 @@ SETUP_WAIT=6 SESSION_KEEP=15
 while [ $# -gt 0 ]; do
     case "$1" in
     --stand) STAND="$2"; shift 2 ;;
-    --size-mb) SIZE_MB="$2"; shift 2 ;;
+    --size-mb) FWD_SIZE_MB="$2"; shift 2 ;;
     *) bench::die "unknown flag: $1" ;;
     esac
 done
@@ -92,7 +92,7 @@ with open("/dev/shm/fwd-tcp-in.bin", "wb") as f:
 EOF
 
 rm -f /dev/shm/fwd-tcp-in.bin /dev/shm/fwd-tcp-echo.txt
-head -c $((SIZE_MB * 1024 * 1024)) /dev/urandom > /dev/shm/fwd-blob.bin
+head -c $((FWD_SIZE_MB * 1024 * 1024)) /dev/urandom > /dev/shm/fwd-blob.bin
 REF_SHA="$(bench::local_sha /dev/shm/fwd-blob.bin)"
 
 python3 /dev/shm/fwd_tcp_sink.py >/dev/null 2>&1 &
@@ -108,7 +108,7 @@ if wait_port tcp "$TCP_LOCAL" && nc -q 3 127.0.0.1 "$TCP_LOCAL" < /dev/shm/fwd-b
         B10="PASS"
     fi
 fi
-echo "B10-TCP: $B10 (greeting+${SIZE_MB}MiB sha-verified)"
+echo "B10-TCP: $B10 (greeting+${FWD_SIZE_MB}MiB sha-verified)"
 kill_quiet "$SINK"
 kill_quiet "$CLIENT_PID"
 
