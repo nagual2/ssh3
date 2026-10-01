@@ -243,6 +243,22 @@ func handleMasterConn(ctx context.Context, c *Client, conn net.Conn,
 				return
 			}
 
+		case cm.MsgOpenForwardTCP, cm.MsgOpenForwardUDP:
+			var fwd cm.OpenForward
+			if err := fwd.Decode(payload); err != nil {
+				masterSendError(conn, fmt.Sprintf("malformed OPEN_FORWARD: %v", err))
+				continue
+			}
+			bound, err := masterOpenForward(ctx, c, typ, &fwd)
+			if err != nil {
+				masterSendError(conn, err.Error())
+				continue
+			}
+			if err := cm.WriteFrame(conn, cm.MsgOK, []byte(bound)); err != nil {
+				return
+			}
+			log.Debug().Msgf("master: forwarding %v from %s to %s (bound %s)", typ, fwd.ListenAddr, fwd.TargetAddr, bound)
+
 		case cm.MsgExit:
 			if err := cm.WriteFrame(conn, cm.MsgOK, nil); err == nil {
 				log.Debug().Msgf("master: shutdown requested, closing control socket")
@@ -258,14 +274,11 @@ func handleMasterConn(ctx context.Context, c *Client, conn net.Conn,
 }
 
 func masterOpenSession(ctx context.Context, c *Client, req *cm.OpenSession) (*cmSession, error) {
-	if req.ForwardAgent {
-		return nil, errors.New("agent forwarding through the master is not supported yet")
-	}
 	token, err := cm.NewToken()
 	if err != nil {
 		return nil, err
 	}
-	spec := SessionSpec{Command: req.Command}
+	spec := SessionSpec{Command: req.Command, ForwardAgent: req.ForwardAgent}
 	if req.Pty != nil {
 		spec.Pty = &PtySpec{
 			Term:        req.Pty.Term,
@@ -275,6 +288,9 @@ func masterOpenSession(ctx context.Context, c *Client, req *cm.OpenSession) (*cm
 			PixelHeight: uint64(req.Pty.PixelHeight),
 		}
 	}
+	// ForwardAgent passes through: the agent bridge in OpenSession dials
+	// SSH_AUTH_SOCK from the master's environment, which is the same socket
+	// the slave would reach (same user, same host).
 	channel, ptyRequested, err := c.OpenSession(ctx, spec)
 	if err != nil {
 		if channel != nil {
@@ -283,6 +299,47 @@ func masterOpenSession(ctx context.Context, c *Client, req *cm.OpenSession) (*cm
 		return nil, err
 	}
 	return &cmSession{token: token, channel: channel, ptyRequested: ptyRequested}, nil
+}
+
+// masterOpenForward starts a local forward on the master: it listens on the
+// requested local address and relays connections/datagrams to the target
+// through the shared connection. Returns the bound local address.
+func masterOpenForward(ctx context.Context, c *Client, typ cm.MsgType, fwd *cm.OpenForward) (string, error) {
+	if fwd.ListenAddr == "" || fwd.TargetAddr == "" {
+		return "", errors.New("listen and target addresses are required")
+	}
+	switch typ {
+	case cm.MsgOpenForwardTCP:
+		local, err := net.ResolveTCPAddr("tcp", fwd.ListenAddr)
+		if err != nil {
+			return "", fmt.Errorf("bad listen address: %w", err)
+		}
+		remote, err := net.ResolveTCPAddr("tcp", fwd.TargetAddr)
+		if err != nil {
+			return "", fmt.Errorf("bad target address: %w", err)
+		}
+		bound, err := c.ForwardTCP(ctx, local, remote)
+		if err != nil {
+			return "", err
+		}
+		return bound.String(), nil
+	case cm.MsgOpenForwardUDP:
+		local, err := net.ResolveUDPAddr("udp", fwd.ListenAddr)
+		if err != nil {
+			return "", fmt.Errorf("bad listen address: %w", err)
+		}
+		remote, err := net.ResolveUDPAddr("udp", fwd.TargetAddr)
+		if err != nil {
+			return "", fmt.Errorf("bad target address: %w", err)
+		}
+		bound, err := c.ForwardUDP(ctx, local, remote)
+		if err != nil {
+			return "", err
+		}
+		return bound.String(), nil
+	default:
+		return "", fmt.Errorf("unsupported forward type %v", typ)
+	}
 }
 
 // runMasterBridge relays one session: the io attachment carries slave stdin

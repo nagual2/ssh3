@@ -121,6 +121,34 @@ func ExitMaster(ctx context.Context, controlPath string) error {
 	return err
 }
 
+// OpenMasterForwardTCP asks the master to listen on listenAddr and forward
+// accepted connections to targetAddr through the shared connection. Returns
+// the bound local address (useful when listenAddr has a zero port).
+func OpenMasterForwardTCP(ctx context.Context, controlPath, listenAddr, targetAddr string) (string, error) {
+	return callMasterForward(ctx, controlPath, cm.MsgOpenForwardTCP, listenAddr, targetAddr)
+}
+
+// OpenMasterForwardUDP is the UDP counterpart of OpenMasterForwardTCP.
+func OpenMasterForwardUDP(ctx context.Context, controlPath, listenAddr, targetAddr string) (string, error) {
+	return callMasterForward(ctx, controlPath, cm.MsgOpenForwardUDP, listenAddr, targetAddr)
+}
+
+func callMasterForward(ctx context.Context, controlPath string, typ cm.MsgType, listenAddr, targetAddr string) (string, error) {
+	conn, err := dialCM(ctx, controlPath)
+	if err != nil {
+		return "", fmt.Errorf("could not reach the control master: %w", err)
+	}
+	defer conn.Close()
+	if err := cm.Hello(conn); err != nil {
+		return "", err
+	}
+	resp, err := cm.Call(conn, typ, (&cm.OpenForward{ListenAddr: listenAddr, TargetAddr: targetAddr}).Encode())
+	if err != nil {
+		return "", err
+	}
+	return string(resp), nil
+}
+
 func encodeOpenSessionRequest(spec SessionSpec) ([]byte, error) {
 	req := cm.OpenSession{Command: spec.Command, ForwardAgent: spec.ForwardAgent}
 	if spec.Pty != nil {

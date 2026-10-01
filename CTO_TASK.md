@@ -121,7 +121,7 @@ Increments (TDD, each independently shippable):
 | 2 | Mux framing codec (**done 2026-10-01**: `client/cm` — versioned magic header, strict decoders; 15 unit tests: round-trips, version mismatch, garbage/truncation) | unit tests: round-trip, version mismatch, garbage input |
 | 3 | Master + slave session bridging (**done 2026-10-01**: `client/master.go`/`slave.go` — UDS master serves HELLO/OPEN_SESSION/ATTACH/EXIT, pump relays io+stderr attachments, exit status returns on the control conn; integration test `TestControlMasterSlaveSessionIntegration` gated by `SSH3_CM_INTEGRATION=1`: exec output, exit codes, byte-exact stdin through one master) | integration test on loopback: slave session executes through master |
 | 4 | `ControlPersist`, idle timeout, `-O exit` control ops (**done 2026-10-01**: `MasterOptions.IdleTimeout` — activity-aware watchdog, exits only with no running sessions; `ExitMaster` (-O exit); clean teardown removes the socket file; gated integration subtests) | master survives client exit; clean teardown |
-| 5 | Forwards through master | local TCP/UDP forward via slave request works |
+| 5 | Forwards through master (**done 2026-10-01**: `OpenMasterForwardTCP/UDP` — master listens locally and relays through the shared connection, bound addr returned; agent forwarding now passes through, bridged to the master's `SSH_AUTH_SOCK` = the same socket for a same-user slave; integration subtests TCP+UDP echo round-trips) | local TCP/UDP forward via slave request works |
 | 6 | Config plumbing (`-o ControlMaster/ControlPath/ControlPersist`) | flags documented in all READMEs |
 
 Definition of done: 100 sequential `ssh3 host true` — with a master: 1 handshake total and

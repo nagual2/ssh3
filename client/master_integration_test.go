@@ -77,7 +77,7 @@ func TestControlMasterSlaveSessionIntegration(t *testing.T) {
 		"-url-path", cmTestURLPath,
 		"-cert", certPath,
 		"-key", keyPath)
-	cmd.Env = append(os.Environ(), "SSH3_LOG_FILE="+filepath.Join(dir, "server.log"))
+	cmd.Env = append(os.Environ(), "SSH3_LOG_FILE=/tmp/cm-server.log", "SSH3_LOG_LEVEL=debug")
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	if err := cmd.Start(); err != nil {
@@ -143,6 +143,92 @@ func TestControlMasterSlaveSessionIntegration(t *testing.T) {
 		}
 		if out.String() != "ping-through-master" {
 			t.Fatalf("stdout = %q, want the stdin echoed byte-exact", out.String())
+		}
+	})
+
+	t.Run("TCP forward through master", func(t *testing.T) {
+		// echo server on the server side (same host in this stand)
+		echo, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("echo listen: %v", err)
+		}
+		defer echo.Close()
+		go func() {
+			for {
+				conn, err := echo.Accept()
+				if err != nil {
+					return
+				}
+				go func(c net.Conn) {
+					io.Copy(c, c)
+					c.Close()
+				}(conn)
+			}
+		}()
+
+		bound, err := OpenMasterForwardTCP(ctx, sockPath, "127.0.0.1:0", echo.Addr().String())
+		if err != nil {
+			t.Fatalf("open forward: %v", err)
+		}
+		conn, err := net.Dial("tcp", bound)
+		if err != nil {
+			t.Fatalf("dial forwarded listener %s: %v", bound, err)
+		}
+		defer conn.Close()
+		payload := "ping-through-tcp-forward"
+		if _, err := io.WriteString(conn, payload); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		// a forwarded connection never EOFs on its own: read exactly the
+		// expected echo length instead of waiting for an end of stream
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		got := make([]byte, len(payload))
+		if _, err := io.ReadFull(conn, got); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if string(got) != payload {
+			t.Fatalf("echoed %q, want %q", got, payload)
+		}
+	})
+
+	t.Run("UDP forward through master", func(t *testing.T) {
+		echo, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Fatalf("echo listen: %v", err)
+		}
+		defer echo.Close()
+		go func() {
+			buf := make([]byte, 2048)
+			for {
+				n, addr, err := echo.ReadFromUDP(buf)
+				if err != nil {
+					return
+				}
+				echo.WriteToUDP(buf[:n], addr)
+			}
+		}()
+
+		bound, err := OpenMasterForwardUDP(ctx, sockPath, "127.0.0.1:0", echo.LocalAddr().String())
+		if err != nil {
+			t.Fatalf("open forward: %v", err)
+		}
+		conn, err := net.Dial("udp", bound)
+		if err != nil {
+			t.Fatalf("dial forwarded listener %s: %v", bound, err)
+		}
+		defer conn.Close()
+		payload := "ping-through-udp-forward"
+		if _, err := conn.Write([]byte(payload)); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		got := make([]byte, 2048)
+		n, err := conn.Read(got)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if string(got[:n]) != payload {
+			t.Fatalf("echoed %q, want %q", got[:n], payload)
 		}
 	})
 
@@ -267,7 +353,8 @@ func writeSelfSignedCert(t *testing.T, dir string) (string, string) {
 }
 
 // dialMasterClient performs the QUIC dial and ssh3 auth the CLI would do,
-// reduced to the insecure loopback case.
+// reduced to the insecure loopback case; the dial mirrors
+// cmd.setupQUICConnection (bound UDP socket, same qconf fields).
 func dialMasterClient(t *testing.T, ctx context.Context, username, bind, privKeyPath string) *Client {
 	t.Helper()
 	tlsConf := &tls.Config{
@@ -280,11 +367,21 @@ func dialMasterClient(t *testing.T, ctx context.Context, username, bind, privKey
 		Allow0RTT:          true,
 		EnableDatagrams:    true,
 		KeepAlivePeriod:    time.Second,
+		InitialPacketSize:  1350,
+	}
+	udpConn, err := net.ListenUDP("udp4", nil)
+	if err != nil {
+		t.Fatalf("udp listen: %v", err)
+	}
+	// no Close: the QUIC connection owns the socket for its lifetime, the
+	// process exits with the test
+	remote, err := net.ResolveUDPAddr("udp4", bind)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
 	}
 	var qconn *quic.Conn
-	var err error
 	for attempt := 0; attempt < 20; attempt++ {
-		qconn, err = quic.DialAddrEarly(ctx, bind, tlsConf, &qconf)
+		qconn, err = quic.DialEarly(ctx, udpConn, remote, tlsConf, &qconf)
 		if err == nil {
 			break
 		}
