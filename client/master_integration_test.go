@@ -34,6 +34,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 
 	"github.com/francoismichel/ssh3"
+	"github.com/francoismichel/ssh3/client/cm"
 	client_config "github.com/francoismichel/ssh3/client/config"
 )
 
@@ -98,7 +99,7 @@ func TestControlMasterSlaveSessionIntegration(t *testing.T) {
 		t.Fatalf("listen control master: %v", err)
 	}
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- ServeControlMaster(ctx, master, ln) }()
+	go func() { serveDone <- ServeControlMaster(ctx, master, ln, nil) }()
 
 	t.Run("exec output and status", func(t *testing.T) {
 		var out, errBuf strings.Builder
@@ -145,15 +146,77 @@ func TestControlMasterSlaveSessionIntegration(t *testing.T) {
 		}
 	})
 
-	cancel()
-	select {
-	case err := <-serveDone:
-		if err != nil {
-			t.Fatalf("serve: %v", err)
+	t.Run("-O exit stops the master", func(t *testing.T) {
+		if err := ExitMaster(ctx, sockPath); err != nil {
+			t.Fatalf("exit op: %v", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatalf("master did not stop after context cancel")
-	}
+		select {
+		case err := <-serveDone:
+			if err != nil {
+				t.Fatalf("serve: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("master did not stop after the exit op")
+		}
+		// clean teardown: the socket file is gone
+		if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
+			t.Fatalf("socket file still present after master exit (stat err = %v)", err)
+		}
+		// and a new slave cannot reach it
+		if _, err := RunSlaveSession(ctx, sockPath, SessionSpec{Command: []string{"true"}},
+			strings.NewReader(""), io.Discard, io.Discard); err == nil {
+			t.Fatalf("slave session succeeded after master exit, want failure")
+		}
+	})
+
+	t.Run("idle timeout stops the master", func(t *testing.T) {
+		idleSock := filepath.Join(dir, "cm-idle.sock")
+		ln2, err := ListenControlMaster(idleSock)
+		if err != nil {
+			t.Fatalf("listen idle master: %v", err)
+		}
+		idleDone := make(chan error, 1)
+		go func() {
+			idleDone <- ServeControlMaster(ctx, master, ln2, &MasterOptions{IdleTimeout: time.Second})
+		}()
+
+		// touching the control socket counts as activity and must postpone
+		// the idle exit past the 1s window
+		touch := func() {
+			conn, err := net.Dial("unix", idleSock)
+			if err != nil {
+				return
+			}
+			cm.Hello(conn)
+			conn.Close()
+		}
+		deadline := time.Now().Add(1500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			touch()
+			time.Sleep(300 * time.Millisecond)
+			select {
+			case err := <-idleDone:
+				t.Fatalf("master exited too early: %v", err)
+			default:
+			}
+		}
+		// touches stop: the master must idle out within the window + slack
+		select {
+		case err := <-idleDone:
+			if err != nil {
+				t.Fatalf("serve: %v", err)
+			}
+		case <-time.After(4 * time.Second):
+			t.Fatalf("master did not stop after the idle timeout")
+		}
+		if _, err := os.Stat(idleSock); !os.IsNotExist(err) {
+			t.Fatalf("idle master socket file still present (stat err = %v)", err)
+		}
+	})
+
+	// master #1 was already stopped by the -O exit subtest (its serveDone
+	// value was consumed there); cancel is cleanup for the QUIC client
+	cancel()
 }
 
 func freeUDPPort(t *testing.T) int {

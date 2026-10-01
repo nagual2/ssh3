@@ -12,12 +12,23 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
 	"github.com/francoismichel/ssh3"
 	"github.com/francoismichel/ssh3/client/cm"
 )
+
+// MasterOptions configures the control-master lifecycle (stage 3.5,
+// increment 4: ControlPersist semantics).
+type MasterOptions struct {
+	// IdleTimeout stops the master after this much inactivity: no control
+	// connection traffic and no running sessions. Zero (default) persists
+	// until the context ends or a slave sends EXIT.
+	IdleTimeout time.Duration
+}
 
 // ListenControlMaster creates and prepares the control-master UDS listener
 // with 0600 permissions.
@@ -45,16 +56,63 @@ type cmSession struct {
 	started bool
 }
 
-// ServeControlMaster serves the control channel on ln until ctx is done or
-// a slave sends EXIT. The connection must be an authenticated Client; every
-// slave session then runs as a channel on this connection.
-func ServeControlMaster(ctx context.Context, c *Client, ln net.Listener) error {
+// ServeControlMaster serves the control channel on ln until ctx is done, a
+// slave sends EXIT, or (with MasterOptions.IdleTimeout) the master idles out
+// with no running sessions. The connection must be an authenticated Client;
+// every slave session then runs as a channel on this connection. On return
+// the socket file is removed (clean teardown). Already-running bridges are
+// not interrupted by EXIT; closing the underlying Client (typically via the
+// caller's ctx) ends them.
+func ServeControlMaster(ctx context.Context, c *Client, ln net.Listener, opts *MasterOptions) error {
+	if opts == nil {
+		opts = &MasterOptions{}
+	}
 	var mu sync.Mutex
 	sessions := make(map[cm.Token]*cmSession)
+
+	var lastActivity atomic.Int64
+	lastActivity.Store(time.Now().UnixNano())
+
+	if opts.IdleTimeout > 0 {
+		tick := opts.IdleTimeout / 4
+		if tick > time.Second {
+			tick = time.Second
+		}
+		if tick < 50*time.Millisecond {
+			tick = 50 * time.Millisecond
+		}
+		go func() {
+			ticker := time.NewTicker(tick)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					mu.Lock()
+					running := len(sessions)
+					mu.Unlock()
+					idle := time.Since(time.Unix(0, lastActivity.Load()))
+					if running == 0 && idle >= opts.IdleTimeout {
+						log.Debug().Msgf("master: idle for %v, closing control socket", idle.Truncate(time.Millisecond))
+						ln.Close()
+						return
+					}
+				}
+			}
+		}()
+	}
 
 	go func() {
 		<-ctx.Done()
 		ln.Close()
+	}()
+
+	defer func() {
+		ln.Close()
+		if addr, ok := ln.Addr().(*net.UnixAddr); ok && addr.Name != "" {
+			os.Remove(addr.Name) // clean teardown: no stale socket file
+		}
 	}()
 
 	for {
@@ -64,10 +122,11 @@ func ServeControlMaster(ctx context.Context, c *Client, ln net.Listener) error {
 			case <-ctx.Done():
 				return nil
 			default:
-				return err
+				return nil // EXIT and idle timeout are orderly shutdowns too
 			}
 		}
-		go handleMasterConn(ctx, c, conn, sessions, &mu, ln)
+		lastActivity.Store(time.Now().UnixNano())
+		go handleMasterConn(ctx, c, conn, sessions, &mu, ln, &lastActivity)
 	}
 }
 
@@ -79,7 +138,8 @@ func masterSendError(conn net.Conn, msg string) {
 // Connections whose ownership moves to a session bridge (attach conns, and
 // the control conn of a started session) are closed by the bridge, not here.
 func handleMasterConn(ctx context.Context, c *Client, conn net.Conn,
-	sessions map[cm.Token]*cmSession, mu *sync.Mutex, ln net.Listener) {
+	sessions map[cm.Token]*cmSession, mu *sync.Mutex, ln net.Listener,
+	lastActivity *atomic.Int64) {
 
 	moved := false
 	defer func() {
@@ -105,6 +165,7 @@ func handleMasterConn(ctx context.Context, c *Client, conn net.Conn,
 		if err != nil {
 			return
 		}
+		lastActivity.Store(time.Now().UnixNano())
 		switch typ {
 		case cm.MsgOpenSession:
 			var req cm.OpenSession

@@ -105,6 +105,22 @@ func RunSlaveSession(ctx context.Context, controlPath string, spec SessionSpec,
 	}
 }
 
+// ExitMaster asks the ControlMaster listening on controlPath to shut down
+// cleanly (the -O exit control op). The master stops accepting new slaves
+// and removes its socket; already-running sessions finish on their channel.
+func ExitMaster(ctx context.Context, controlPath string) error {
+	conn, err := dialCM(ctx, controlPath)
+	if err != nil {
+		return fmt.Errorf("could not reach the control master: %w", err)
+	}
+	defer conn.Close()
+	if err := cm.Hello(conn); err != nil {
+		return err
+	}
+	_, err = cm.Call(conn, cm.MsgExit, nil)
+	return err
+}
+
 func encodeOpenSessionRequest(spec SessionSpec) ([]byte, error) {
 	req := cm.OpenSession{Command: spec.Command, ForwardAgent: spec.ForwardAgent}
 	if spec.Pty != nil {
