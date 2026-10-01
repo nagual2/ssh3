@@ -255,6 +255,13 @@ func (s *Server) GetHTTPHandlerFunc(ctx context.Context) AuthenticatedHandlerFun
 			conversationsManager := s.getOrCreateConversationsManager(qconn)
 			conversationsManager.addConversation(newConv)
 
+			// a control master shares the conversation across slave
+			// sessions (stage 3.5): mark it so the per-session teardown
+			// in the session handler does not kill the shared connection
+			if r.URL.Query().Get("mux") == "1" {
+				newConv.SetMultiplexed()
+			}
+
 			w.WriteHeader(200)
 			log.Debug().Msgf(
 				"accepted SSH3 CONNECT for user %s on control stream %d",

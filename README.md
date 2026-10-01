@@ -208,6 +208,40 @@ them with `-P` and `-U`, or spell the operand as
 nodes) are skipped during recursive transfers, and an empty directory is
 created on the other side.
 
+## Control master (connection multiplexing)
+
+One authenticated connection shared by many invocations - the first run
+performs the handshake, later runs reuse it through a Unix socket
+(stage 3.5):
+
+```bash
+# start a persistent master in the background (returns immediately)
+ssh3 -control-master=yes -control-persist=yes user@host
+
+# subsequent invocations act as slaves: no new handshake, ~5x faster startup
+ssh3 -control-master=auto user@host 'uptime'
+ssh3 -control-master=auto user@host 'tail -n 5 /var/log/syslog'
+ssh3 -control-master=auto -forward-tcp 8080/127.0.0.1@80 user@host 'sleep 30'
+
+# shut the master down
+ssh3 -O exit -control-path ~/.ssh3/cm-user@host:443 user@host
+```
+
+| Flag | Meaning |
+|------|---------|
+| `-control-master no\|yes\|auto` | `auto` reuses a running master and starts one if none exists; `yes` always starts one; default `no` |
+| `-control-path PATH` | control socket path; default `~/.ssh3/cm-<user>@<host>:<port>`, permissions 0600 |
+| `-control-persist no\|yes\|<seconds>` | keep the master in the background after sessions end; `yes` = forever, a number = idle timeout |
+| `-O exit` | stop the master (requires the target operand, like OpenSSH) |
+
+Notes: the master is a detached copy of this binary (`SSH3_CM_DAEMON=1`);
+every slave session, TCP/UDP forward and agent forwarding is multiplexed
+over the master's single QUIC connection. The measured median of 100
+sequential execs drops from ~130 ms (cold, one handshake each) to ~24 ms
+(~17%) with exactly one handshake. Limitations: window changes and signals
+are not forwarded through the master yet, `-proxy-jump` is incompatible,
+Windows is not supported.
+
 ## Authentication
 ### Public key
 Rust client:

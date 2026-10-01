@@ -233,9 +233,28 @@ type Client struct {
 	*ssh3.Conversation
 }
 
+// DialOption customizes a client.Dial call.
+type DialOption func(*dialOptions)
+
+type dialOptions struct {
+	multiplexed bool
+}
+
+// WithMultiplexed marks the conversation as shared by a control master:
+// the server keeps it alive across session channels and releases it when
+// the master disconnects (stage 3.5).
+func WithMultiplexed() DialOption {
+	return func(o *dialOptions) { o.multiplexed = true }
+}
+
 func Dial(ctx context.Context, config *client_config.Config, qconn *quic.Conn,
 	transport *http3.Transport,
-	sshAgent agent.ExtendedAgent) (*Client, error) {
+	sshAgent agent.ExtendedAgent, opts ...DialOption) (*Client, error) {
+
+	var dialOpts dialOptions
+	for _, opt := range opts {
+		opt(&dialOpts)
+	}
 
 	hostUrl := url.URL{}
 	hostUrl.Scheme = "https"
@@ -243,6 +262,9 @@ func Dial(ctx context.Context, config *client_config.Config, qconn *quic.Conn,
 	hostUrl.Path = config.UrlPath()
 	urlQuery := hostUrl.Query()
 	urlQuery.Set("user", config.Username())
+	if dialOpts.multiplexed {
+		urlQuery.Set("mux", "1")
+	}
 	hostUrl.RawQuery = urlQuery.Encode()
 	requestUrl := hostUrl.String()
 

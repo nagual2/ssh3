@@ -207,6 +207,40 @@ und `-U`, oder als vollständige Form `user@host:port/url_path:remote_path`.
 Unreguläre Dateien (Symlinks, Geräte) werden bei rekursiven Übertragungen
 übersprungen, ein leeres Verzeichnis wird auf der Gegenseite angelegt.
 
+## Control Master (Verbindungsmultiplexing)
+
+Eine authentifizierte Verbindung für viele Aufrufe - der erste Lauf macht
+den Handshake, weitere nutzen ihn über einen Unix-Socket (Stage 3.5):
+
+```bash
+# persistenten Master im Hintergrund starten (kehrt sofort zurück)
+ssh3 -control-master=yes -control-persist=yes user@host
+
+# weitere Aufrufe laufen als Slave: kein neuer Handshake, ~5x schneller Start
+ssh3 -control-master=auto user@host 'uptime'
+ssh3 -control-master=auto user@host 'tail -n 5 /var/log/syslog'
+ssh3 -control-master=auto -forward-tcp 8080/127.0.0.1@80 user@host 'sleep 30'
+
+# Master beenden
+ssh3 -O exit -control-path ~/.ssh3/cm-user@host:443 user@host
+```
+
+| Flag | Bedeutung |
+|------|-----------|
+| `-control-master no\|yes\|auto` | `auto` nutzt einen laufenden Master und startet sonst einen; `yes` startet immer; Standard `no` |
+| `-control-path PFAD` | Pfad des Steuerungs-Sockets; Standard `~/.ssh3/cm-<user>@<host>:<port>`, Rechte 0600 |
+| `-control-persist no\|yes\|<Sekunden>` | Master nach Sitzungsende im Hintergrund halten; `yes` = unbegrenzt, Zahl = Idle-Timeout |
+| `-O exit` | Master beenden (benötigt das Ziel-Operand, wie OpenSSH) |
+
+Hinweise: der Master ist eine abgelöste Kopie dieses Binärprogramms
+(`SSH3_CM_DAEMON=1`); jede Slave-Sitzung, TCP/UDP-Weiterleitung und das
+Agent-Forwarding werden über die eine QUIC-Verbindung des Masters
+multiplext. Der Median von 100 aufeinanderfolgenden Execs sinkt von
+~130 ms (kalt, je ein Handshake) auf ~24 ms (~17%) bei genau einem
+Handshake. Einschränkungen: Fensteränderungen und Signale werden noch
+nicht durch den Master weitergeleitet, `-proxy-jump` ist inkompatibel,
+Windows wird nicht unterstützt.
+
 ## Authentifizierung
 ### Public Key
 Rust-Client:

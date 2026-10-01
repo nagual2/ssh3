@@ -122,7 +122,16 @@ Increments (TDD, each independently shippable):
 | 3 | Master + slave session bridging (**done 2026-10-01**: `client/master.go`/`slave.go` — UDS master serves HELLO/OPEN_SESSION/ATTACH/EXIT, pump relays io+stderr attachments, exit status returns on the control conn; integration test `TestControlMasterSlaveSessionIntegration` gated by `SSH3_CM_INTEGRATION=1`: exec output, exit codes, byte-exact stdin through one master) | integration test on loopback: slave session executes through master |
 | 4 | `ControlPersist`, idle timeout, `-O exit` control ops (**done 2026-10-01**: `MasterOptions.IdleTimeout` — activity-aware watchdog, exits only with no running sessions; `ExitMaster` (-O exit); clean teardown removes the socket file; gated integration subtests) | master survives client exit; clean teardown |
 | 5 | Forwards through master (**done 2026-10-01**: `OpenMasterForwardTCP/UDP` — master listens locally and relays through the shared connection, bound addr returned; agent forwarding now passes through, bridged to the master's `SSH_AUTH_SOCK` = the same socket for a same-user slave; integration subtests TCP+UDP echo round-trips) | local TCP/UDP forward via slave request works |
-| 6 | Config plumbing (`-o ControlMaster/ControlPath/ControlPersist`) | flags documented in all READMEs |
+| 6 | Config plumbing (`-o ControlMaster/ControlPath/ControlPersist`) (**done 2026-10-01**: Go-flag style `-control-master no|yes|auto`, `-control-path` (default `~/.ssh3/cm-<user>@<host>:<port>`, 0600), `-control-persist no|yes|<seconds>`, `-O exit`; detached master = re-exec with `SSH3_CM_DAEMON=1`; slave console raw mode + pty pass-through; documented in README.md/ru/de) | flags documented in all READMEs |
+
+**Stage 3.5 DoD: achieved 2026-10-01** — 100 sequential `ssh3 host true` with a master:
+**1 handshake total**, per-exec median **24 ms = 17%** of the cold path (139 ms;
+acceptance <=30%); without a master: 100 handshakes. Two server-side fixes were
+required for multiplexed conversations (both wire-compatible): CONNECT `mux=1`
+marker marks the conversation (`Conversation.SetMultiplexed`) so the per-session
+`DrainAndClose` teardown is skipped, and the 100 ms packer-yield sleep before the
+session channel close is gated on `!IsMultiplexed` (it added a flat 100 ms to
+every slave session).
 
 Definition of done: 100 sequential `ssh3 host true` — with a master: 1 handshake total and
 per-exec time ≤ 30% of the cold path; without: 100 handshakes. No new dependencies.

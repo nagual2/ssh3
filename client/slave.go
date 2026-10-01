@@ -105,6 +105,16 @@ func RunSlaveSession(ctx context.Context, controlPath string, spec SessionSpec,
 	}
 }
 
+// PingMaster reports whether a control master is serving on controlPath.
+func PingMaster(ctx context.Context, controlPath string) bool {
+	conn, err := dialCM(ctx, controlPath)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	return cm.Hello(conn) == nil
+}
+
 // ExitMaster asks the ControlMaster listening on controlPath to shut down
 // cleanly (the -O exit control op). The master stops accepting new slaves
 // and removes its socket; already-running sessions finish on their channel.

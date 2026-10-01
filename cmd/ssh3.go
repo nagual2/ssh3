@@ -392,6 +392,10 @@ func ClientMain() int {
 	displayVersion := flag.Bool("version", false, "if set, displays the software version on standard output and exit")
 	streamRxMiB := flag.Int("stream-rx-mb", 8, "initial per-stream flow control receive window in MiB")
 	connRxMiB := flag.Int("conn-rx-mb", 16, "initial connection-level flow control receive window in MiB")
+	controlOp := flag.String("O", "", "control operation on an existing control master: only \"exit\" is supported")
+	controlMaster := flag.String("control-master", "no", "share one connection across invocations: no, yes or auto (reuse a running master, else start one in background; not compatible with -proxy-jump; unsupported on windows)")
+	controlPathFlag := flag.String("control-path", "", "control master unix socket path (default ~/.ssh3/cm-<user>@<host>:<port>)")
+	controlPersist := flag.String("control-persist", "no", "keep the master in background after the session ends: no, yes or a number of seconds (idle timeout)")
 	packetSize := flag.Int("packet-size", 1350, "initial QUIC packet size in bytes")
 	noPKCE := flag.Bool("no-pkce", false, "if set perform PKCE challenge-response with oidc")
 	forwardSSHAgent := flag.Bool("forward-agent", false, "if set, forwards ssh agent to be used with sshv2 connections on the remote host")
@@ -682,6 +686,76 @@ func ClientMain() int {
 	if err != nil {
 		log.Error().Msgf("Could not get connection material for %s: %s", parsedUrl, err)
 		return -1
+	}
+
+	// --- ControlMaster (stage 3.5) ---
+	controlPath := *controlPathFlag
+	if controlPath == "" {
+		controlPath = path.Join(ssh3Dir, fmt.Sprintf("cm-%s@%s:%d", options.Username(), options.Hostname(), options.Port()))
+	}
+	if *controlOp != "" {
+		if *controlOp != "exit" {
+			log.Error().Msgf("unsupported control operation %q, only \"exit\"", *controlOp)
+			return -1
+		}
+		opCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := client.ExitMaster(opCtx, controlPath); err != nil {
+			log.Error().Msgf("control operation failed: %s", err)
+			return -1
+		}
+		return 0
+	}
+	if *controlMaster == "yes" || *controlMaster == "auto" {
+		if runtime.GOOS == "windows" {
+			log.Warn().Msgf("control-master is not supported on windows yet, running a direct session")
+		} else if os.Getenv(cmDaemonEnv) == "1" {
+			// this process is the detached master: connect and serve the
+			// control socket; it never runs sessions itself
+			idleTimeout, _ := parseControlPersist(*controlPersist)
+			qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, options, nil, nil, tuning)
+			if qconn == nil {
+				return status
+			}
+			transport := &http3.Transport{}
+			c, err := client.Dial(ctx, options, qconn, transport, nil, client.WithMultiplexed())
+			if err != nil {
+				log.Error().Msgf("the control master could not establish its connection: %s", err)
+				return -1
+			}
+			defer c.Close()
+			ln, err := client.ListenControlMaster(controlPath)
+			if err != nil {
+				log.Error().Msgf("could not listen on the control socket: %s", err)
+				return -1
+			}
+			log.Debug().Msgf("control master serving on %s", controlPath)
+			serveCtx := context.Background() // detached: only -O exit or the idle timeout end it
+			if err := client.ServeControlMaster(serveCtx, c, ln, &client.MasterOptions{IdleTimeout: idleTimeout}); err != nil {
+				log.Error().Msgf("control master stopped: %s", err)
+				return -1
+			}
+			return 0
+		} else if client.PingMaster(ctx, controlPath) {
+			// a master is already serving: run this invocation as a slave
+			return runSlaveCommand(ctx, controlPath, command, tty)
+		} else if _, ok := parseControlPersist(*controlPersist); ok {
+			// no master yet: spawn one detached, then run as a slave
+			if err := startDetachedMaster(); err != nil {
+				log.Error().Msgf("could not start the detached control master: %s", err)
+				return -1
+			}
+			if !waitForMaster(ctx, controlPath, 10*time.Second) {
+				log.Error().Msgf("the control master did not start")
+				return -1
+			}
+			if len(command) == 0 {
+				return 0
+			}
+			return runSlaveCommand(ctx, controlPath, command, tty)
+		}
+		// control-master requested with control-persist=no: a master without
+		// persist cannot outlive this process, run a direct session instead
 	}
 
 	if *proxyJump == "" && sshConfig != nil {

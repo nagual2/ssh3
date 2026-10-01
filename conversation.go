@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/francoismichel/ssh3/util"
@@ -49,6 +50,8 @@ type Conversation struct {
 	peerVersion               Version
 
 	channelsAcceptQueue *util.AcceptQueue[Channel]
+
+	multiplexed atomic.Bool // set by a control master's CONNECT (stage 3.5)
 }
 
 func GenerateConversationID(tls *tls.ConnectionState) (convID ConversationID, err error) {
@@ -435,6 +438,28 @@ func (c *Conversation) AddDatagram(ctx context.Context, datagram []byte) error {
 func (c *Conversation) Close() {
 	c.controlStream.Close()
 	c.cancelContext(nil)
+}
+
+// SetMultiplexed marks the conversation as shared by a control master
+// (stage 3.5): its session channels come and go while the connection stays
+// up, so the per-session teardown must not fire; the conversation is
+// released when the master disconnects. Idempotent.
+func (c *Conversation) SetMultiplexed() {
+	if !c.multiplexed.CompareAndSwap(false, true) {
+		return
+	}
+	if qconn, ok := c.streamCreator.(*quic.Conn); ok {
+		go func() {
+			<-qconn.Context().Done()
+			c.Close()
+		}()
+	}
+}
+
+// IsMultiplexed reports whether the conversation belongs to a control
+// master (see SetMultiplexed).
+func (c *Conversation) IsMultiplexed() bool {
+	return c.multiplexed.Load()
 }
 
 // DrainAndClose waits for the peer to finish reading in-flight stream data

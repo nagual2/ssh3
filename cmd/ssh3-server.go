@@ -1082,8 +1082,17 @@ func ServerMain() int {
 					// DrainAndClose then keeps the conversation alive long enough
 					// for the peer to consume the tail of the stream data before
 					// the forced close.
-					defer conv.DrainAndClose(3 * time.Second)
-					defer channel.Close()
+					// A multiplexing conversation (control master, stage 3.5)
+					// outlives every single session: its teardown happens when
+					// the master disconnects (SetMultiplexed watcher).
+					defer func() {
+						channel.Close()
+						if conv.IsMultiplexed() {
+							log.Debug().Msgf("muxed conversation: skipping per-session teardown for channel %d", channel.ChannelID())
+							return
+						}
+						conv.DrainAndClose(3 * time.Second)
+					}()
 					for {
 						genericMessage, err := channel.NextMessage()
 						if errors.Is(err, net.ErrClosed) {
@@ -1120,7 +1129,13 @@ func ServerMain() int {
 										// let the packer pick the buffered frame up; the client
 										// still receives the status well before its next read
 										// would time out.
-										time.Sleep(100 * time.Millisecond)
+										// The yield only guards the teardown below: a
+										// multiplexing conversation (control master) is not
+										// torn down here, and the sleep would add a flat
+										// 100ms to every slave session.
+										if !conv.IsMultiplexed() {
+											time.Sleep(100 * time.Millisecond)
+										}
 									}
 								}
 							}

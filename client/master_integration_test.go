@@ -395,7 +395,7 @@ func dialMasterClient(t *testing.T, ctx context.Context, username, bind, privKey
 	if err != nil {
 		t.Fatalf("config: %v", err)
 	}
-	c, err := Dial(ctx, config, qconn, &http3.Transport{}, nil)
+	c, err := Dial(ctx, config, qconn, &http3.Transport{}, nil, WithMultiplexed())
 	if err != nil {
 		t.Fatalf("ssh3 dial: %v", err)
 	}

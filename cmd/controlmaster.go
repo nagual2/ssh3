@@ -1,0 +1,110 @@
+package cmd
+
+// ControlMaster CLI plumbing (stage 3.5, increment 6): flag semantics and
+// the slave-side console handling. The master itself is a detached re-exec
+// of this binary (SSH3_CM_DAEMON=1) that serves the control socket and
+// never runs sessions; invoking clients act as slaves through it.
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"strconv"
+	"time"
+
+	"github.com/rs/zerolog/log"
+	"golang.org/x/term"
+
+	"github.com/francoismichel/ssh3/client"
+	"github.com/francoismichel/ssh3/client/winsize"
+)
+
+// cmDaemonEnv marks a re-executed process as the detached control master.
+const cmDaemonEnv = "SSH3_CM_DAEMON"
+
+// parseControlPersist maps -control-persist to an idle timeout: "no" gives
+// (0, false) meaning no master at all, "yes" gives (0, true) meaning
+// persist forever, a number of seconds gives that idle timeout.
+func parseControlPersist(value string) (time.Duration, bool) {
+	if value == "" || value == "no" {
+		return 0, false
+	}
+	if value == "yes" {
+		return 0, true
+	}
+	secs, err := strconv.Atoi(value)
+	if err != nil || secs < 0 {
+		log.Warn().Msgf("invalid -control-persist %q, treating as no", value)
+		return 0, false
+	}
+	return time.Duration(secs) * time.Second, true
+}
+
+// startDetachedMaster re-executes this binary detached, with the daemon env
+// marker; the child connects and serves the control socket.
+func startDetachedMaster() error {
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(self, os.Args[1:]...)
+	cmd.Env = append(os.Environ(), cmDaemonEnv+"=1")
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+	cmd.SysProcAttr = daemonSysProcAttr()
+	return cmd.Start()
+}
+
+// runSlaveCommand runs one session through the control master with the
+// process stdio. Interactive sessions request a pty through the master and
+// set the local console raw; window changes and signals are not forwarded
+// through the control channel yet.
+func runSlaveCommand(ctx context.Context, controlPath string, command []string, tty *os.File) int {
+	spec := client.SessionSpec{Command: command}
+	if len(command) == 0 && tty != nil && term.IsTerminal(int(tty.Fd())) {
+		windowSize, err := winsize.GetWinsize(tty)
+		hasWinSize := err == nil
+		if !hasWinSize {
+			log.Warn().Msgf("could not get window size: %+v, using 80x24", err)
+			windowSize.NCols, windowSize.NRows = 80, 24
+		}
+		termType := os.Getenv("TERM")
+		if termType == "" {
+			termType = "xterm"
+		}
+		spec.Pty = &client.PtySpec{
+			Term:        termType,
+			Columns:     uint64(windowSize.NCols),
+			Rows:        uint64(windowSize.NRows),
+			PixelWidth:  uint64(windowSize.PixelWidth),
+			PixelHeight: uint64(windowSize.PixelHeight),
+		}
+		fd := os.Stdin.Fd()
+		oldState, err := term.MakeRaw(int(fd))
+		if err != nil {
+			log.Warn().Msgf("cannot make tty raw: %s", err)
+		} else {
+			defer term.Restore(int(fd), oldState)
+		}
+		defer fmt.Printf("\r")
+	}
+	code, err := client.RunSlaveSession(ctx, controlPath, spec, os.Stdin, os.Stdout, os.Stderr)
+	if err != nil {
+		log.Error().Msgf("control-master session: %s", err)
+		return -1
+	}
+	return code
+}
+
+// waitForMaster polls the control socket until a master answers or the
+// deadline passes.
+func waitForMaster(ctx context.Context, controlPath string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for !client.PingMaster(ctx, controlPath) {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return true
+}
