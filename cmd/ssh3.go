@@ -424,6 +424,51 @@ func ClientMain() int {
 
 	flag.Parse()
 	args := flag.Args()
+
+	// ControlMaster fast path (stage 3.5): an explicit -control-path needs no
+	// server-side material (keys, known hosts, cert pools) - a slave only
+	// dials the control socket, so skip the heavy initialization entirely.
+	// The default control path stays on the slow road below: it must be
+	// computed from the full configuration to match the master's exactly.
+	fastCM := runtime.GOOS != "windows" &&
+		os.Getenv(cmDaemonEnv) != "1" &&
+		*controlPathFlag != "" &&
+		(*controlOp != "" || *controlMaster == "yes" || *controlMaster == "auto")
+	if fastCM {
+		cmCtx := context.Background()
+		if *controlOp != "" {
+			if *controlOp != "exit" {
+				log.Error().Msgf("unsupported control operation %q, only \"exit\"", *controlOp)
+				return -1
+			}
+			opCtx, cancel := context.WithTimeout(cmCtx, 5*time.Second)
+			defer cancel()
+			if err := client.ExitMaster(opCtx, *controlPathFlag); err != nil {
+				log.Error().Msgf("control operation failed: %s", err)
+				return -1
+			}
+			return 0
+		}
+		if !client.PingMaster(cmCtx, *controlPathFlag) {
+			if err := startDetachedMaster(); err != nil {
+				log.Error().Msgf("could not start the detached control master: %s", err)
+				return -1
+			}
+			if !waitForMaster(cmCtx, *controlPathFlag, 10*time.Second) {
+				log.Error().Msgf("the control master did not start")
+				return -1
+			}
+			if len(args) <= 1 {
+				return 0
+			}
+		}
+		var cmTTY *os.File
+		if f, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
+			cmTTY = f
+		}
+		return runSlaveCommand(cmCtx, *controlPathFlag, args[1:], cmTTY)
+	}
+
 	// dereference the tuning keys only after flag.Parse
 	tuning := quicTuning{
 		InitialPacketSize: uint16(*packetSize),
