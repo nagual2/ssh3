@@ -99,7 +99,6 @@ func DecodeExitStatus(payload []byte) (uint64, error) {
 	return binary.BigEndian.Uint64(payload), nil
 }
 
-
 func appendStr(b []byte, s string) []byte {
 	b = binary.BigEndian.AppendUint32(b, uint32(len(s)))
 	return append(b, s...)

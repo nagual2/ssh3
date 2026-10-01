@@ -29,10 +29,10 @@ func TestAttachRoundTrip(t *testing.T) {
 
 func TestAttachRejectsGarbage(t *testing.T) {
 	for _, payload := range [][]byte{
-		{}, // empty
-		{1, 2, 3},                            // short token
-		make([]byte, 15),                     // token without stream byte
-		make([]byte, 18),                     // trailing byte
+		{},               // empty
+		{1, 2, 3},        // short token
+		make([]byte, 15), // token without stream byte
+		make([]byte, 18), // trailing byte
 		{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 2}, // unknown stream kind
 	} {
 		if err := (&Attach{}).Decode(payload); err == nil {

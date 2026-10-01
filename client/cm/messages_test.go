@@ -9,9 +9,9 @@ import (
 
 func TestOpenSessionRoundTripFull(t *testing.T) {
 	in := &OpenSession{
-		Command: []string{"bash", "-lc", "echo hi; printf 'кавычки \" и $VAR'"},
-		Env:     []string{"TERM=xterm-256color", "LANG=ru_RU.UTF-8"},
-		Pty:     &PtySpec{Term: "xterm-256color", Columns: 120, Rows: 40, PixelWidth: 960, PixelHeight: 640},
+		Command:      []string{"bash", "-lc", "echo hi; printf 'кавычки \" и $VAR'"},
+		Env:          []string{"TERM=xterm-256color", "LANG=ru_RU.UTF-8"},
+		Pty:          &PtySpec{Term: "xterm-256color", Columns: 120, Rows: 40, PixelWidth: 960, PixelHeight: 640},
 		ForwardAgent: true,
 	}
 	b, err := in.Encode()
