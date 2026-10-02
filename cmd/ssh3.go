@@ -16,12 +16,14 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/signal"
 	osuser "os/user"
 	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/francoismichel/ssh3"
@@ -58,6 +60,9 @@ type quicTuning struct {
 	InitialPacketSize uint16
 	StreamRxWindowMiB int
 	ConnRxWindowMiB   int
+	// KeepAlivePeriod overrides the default QUIC keepalive (1s);
+	// populated from ~/.ssh/config ServerAliveInterval
+	KeepAlivePeriod time.Duration
 }
 
 func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog io.Writer, ssh3Dir string, certPool *x509.CertPool, knownHostsPath string, knownHosts ssh3.KnownHosts,
@@ -110,7 +115,10 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 	qconf.MaxIncomingStreams = 10
 	qconf.Allow0RTT = true
 	qconf.EnableDatagrams = true
-	qconf.KeepAlivePeriod = 1 * time.Second
+	qconf.KeepAlivePeriod = time.Second
+	if tuning.KeepAlivePeriod > 0 {
+		qconf.KeepAlivePeriod = tuning.KeepAlivePeriod
+	}
 
 	if certs, ok := knownHosts[options.CanonicalHostFormat()]; ok {
 		foundSelfsignedSSH3 := false
@@ -408,6 +416,7 @@ func ClientMain() int {
 	recursive := flag.Bool("r", false, "file transfer mode: transfer directories recursively")
 	resumeMode := flag.Bool("continue", false, "file transfer mode: resume interrupted transfers instead of overwriting")
 	verifyChecksum := flag.Bool("checksum", false, "file transfer mode: verify the transfer with a SHA-256 re-read (automatic for files over 32 MiB)")
+	noSession := flag.Bool("N", false, "do not execute a remote command or session; hold the connection open for the forwards (use with -forward-tcp/-forward-udp)")
 
 	var flagValues []*FlagValue
 	cliParsers, err := internal.GetPluginsCLIArgs()
@@ -424,6 +433,11 @@ func ClientMain() int {
 
 	flag.Parse()
 	args := flag.Args()
+
+	if *controlMaster != "no" && *proxyJump != "" {
+		log.Error().Msgf("-control-master is not compatible with -proxy-jump")
+		return -1
+	}
 
 	// ControlMaster fast path (stage 3.5): an explicit -control-path needs no
 	// server-side material (keys, known hosts, cert pools) - a slave only
@@ -541,6 +555,11 @@ func ClientMain() int {
 	urlFromParam := args[0]
 	command := args[1:]
 
+	if *noSession && *fileTransfer {
+		fmt.Fprintln(os.Stderr, "-N cannot be combined with -f")
+		return -1
+	}
+
 	if *fileTransfer {
 		if len(args) != 2 {
 			fmt.Fprintln(os.Stderr, "file transfer mode expects exactly two operands: one user@host:remote_path and one local path")
@@ -571,6 +590,11 @@ func ClientMain() int {
 		command = nil
 	} else if !strings.HasPrefix(urlFromParam, "https://") {
 		urlFromParam = fmt.Sprintf("https://%s", urlFromParam)
+	}
+
+	if *noSession && len(command) > 0 {
+		fmt.Fprintln(os.Stderr, "-N does not accept a remote command")
+		return -1
 	}
 
 	var localUDPAddr *net.UDPAddr = nil
@@ -733,6 +757,35 @@ func ClientMain() int {
 		return -1
 	}
 
+	// ~/.ssh/config extensions (stage 3): ServerAliveInterval tunes the QUIC
+	// keepalive, ForwardAgent defaults the -forward-agent flag, ProxyJump is
+	// honored as an alias of the fork's UDPProxyJump (the jump host must run
+	// ssh3-server). Include directives are resolved by the config library.
+	tuning.KeepAlivePeriod = time.Second
+	if sshConfig != nil {
+		hostname := parsedUrl.Hostname()
+		if v, err := sshConfig.Get(hostname, "ServerAliveInterval"); err == nil && v != "" {
+			if secs, convErr := strconv.Atoi(v); convErr == nil && secs > 0 {
+				tuning.KeepAlivePeriod = time.Duration(secs) * time.Second
+				log.Debug().Msgf("ServerAliveInterval=%d from ~/.ssh/config", secs)
+			}
+		}
+		if v, err := sshConfig.Get(hostname, "ForwardAgent"); err == nil && strings.EqualFold(v, "yes") {
+			*forwardSSHAgent = true
+		}
+		if *proxyJump == "" {
+			if v, err := sshConfig.Get(hostname, "UDPProxyJump"); err == nil && v != "" {
+				*proxyJump = v
+			} else if v, err := sshConfig.Get(hostname, "ProxyJump"); err == nil && v != "" {
+				*proxyJump = v
+			}
+		}
+	}
+	if (*controlMaster == "yes" || *controlMaster == "auto") && *proxyJump != "" {
+		log.Error().Msgf("-control-master is not compatible with -proxy-jump (from the command line or ~/.ssh/config)")
+		return -1
+	}
+
 	// --- ControlMaster (stage 3.5) ---
 	controlPath := *controlPathFlag
 	if controlPath == "" {
@@ -801,14 +854,6 @@ func ClientMain() int {
 		}
 		// control-master requested with control-persist=no: a master without
 		// persist cannot outlive this process, run a direct session instead
-	}
-
-	if *proxyJump == "" && sshConfig != nil {
-		*proxyJump, err = sshConfig.Get(parsedUrl.Hostname(), "UDPProxyJump")
-		if err != nil {
-			log.Error().Msgf("Could not get UDPProxyJump config value: %s", err)
-			return -1
-		}
 	}
 
 	var proxyAddress *net.UDPAddr
@@ -901,6 +946,16 @@ func ClientMain() int {
 
 	if *fileTransfer {
 		return runFileTransfer(c, fileTransferTarget, fileTransferLocal, fileTransferUpload, *recursive, *resumeMode, *verifyChecksum)
+	}
+
+	if *noSession {
+		log.Info().Msgf("-N: holding the connection open for the forwards until interrupted")
+		sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		<-sigCtx.Done()
+		log.Debug().Msgf("interrupted: closing the connection")
+		c.Close()
+		return 0
 	}
 
 	err = c.RunSession(tty, *forwardSSHAgent, command...)
