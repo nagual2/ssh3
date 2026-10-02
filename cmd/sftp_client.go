@@ -388,6 +388,17 @@ func uploadFile(sftpClient *sftp.Client, localPath, remotePath string, resumeMod
 		remotePath = path.Join(remotePath, path.Base(localPath))
 	}
 
+	// auto-create missing parent directories so uploads into fresh
+	// destinations work without a manual mkdir
+	if dir := path.Dir(remotePath); dir != "." && dir != "/" {
+		if _, err := sftpClient.Stat(dir); err != nil {
+			if err := sftpMkdirAll(sftpClient, dir); err != nil {
+				fmt.Fprintf(os.Stderr, "cannot create remote directory %s: %s\n", dir, err)
+				return -1
+			}
+		}
+	}
+
 	openFlags := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
 	var startOffset int64
 	if resumeMode {

@@ -82,10 +82,21 @@ func serveSFTPSubsystem(user *unix_util.User, channel ssh3.Channel) {
 }
 
 // resolveJailed maps a client-visible path into the jail, rejecting escapes.
+// Two namespaces share the wire: jail-relative paths ("docs/f", "/docs/f")
+// resolve under the user's home directory, while server-absolute paths
+// ("/home/user/docs/f") are honored as-is when they already live inside the
+// jail — the spelling a user knows from an interactive shell. Absolute
+// paths outside the jail remain an escape error.
 func (h *sftpHandlers) resolveJailed(clientPath string) (string, error) {
 	trimmed := strings.TrimSpace(clientPath)
 	if trimmed == "" {
 		trimmed = "/"
+	}
+	if filepath.IsAbs(filepath.FromSlash(trimmed)) {
+		abs := filepath.Clean(filepath.FromSlash(trimmed))
+		if abs == h.root || strings.HasPrefix(abs, h.root+string(filepath.Separator)) {
+			return abs, nil
+		}
 	}
 	clean := path.Clean("/" + trimmed)
 	full := filepath.Join(h.root, filepath.FromSlash(clean))
