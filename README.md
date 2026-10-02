@@ -19,7 +19,7 @@ This repository currently contains two implementations:
 > Do not treat either implementation as production-hardened. The protocol and code are still under active development, and the Rust rewrite is focused on correctness and interoperability first, not product completeness.
 
 ## About the nagual2 fork
-This fork focuses on making the Go implementation a practical daily driver:
+This fork focuses on making the Go implementation a practical daily driver. This README is adapted from the upstream project's README and modified by the fork maintainers; fork-only changes are tracked in [CHANGELOG.md](CHANGELOG.md):
 
 - **Windows client is a first-class citizen.** Since v0.1.8 the client compiles for Windows and supports interactive PTY sessions: VT input/output, UTF-8 console code page, real console size, `SIGINT`/`SIGTERM` forwarding, and a 80x24 PTY fallback when the console size cannot be queried.
 - **Key-only server packaging.** The release `.deb` ships a systemd service (`ssh3-server.service`, UDP 443, secret URL path) built with `-tags disable_password_auth`: password authentication is compiled out, no OIDC is configured, and the post-install script generates a self-signed ed25519 certificate with IP/DNS SANs.
@@ -41,10 +41,23 @@ Grab the assets from the [latest release](https://github.com/nagual2/ssh3/releas
 Install the Debian package:
 
 ```bash
-sudo dpkg -i ssh3_0.1.14_amd64.deb
+sudo dpkg -i ssh3_0.1.21_amd64.deb
 ```
 
 The service listens on UDP 443 under the secret URL path `/ssh3-term`. Configuration lives in `/etc/ssh3/ssh3-server.env` (log file and level, `LANG`), the systemd unit in `/usr/lib/systemd/system/ssh3-server.service`, and a self-signed ed25519 certificate with IP/DNS SANs is generated in `/etc/ssh3/` on install if missing.
+
+### Server configuration
+The release package is configured through the systemd `EnvironmentFile` at `/etc/ssh3/ssh3-server.env`:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SSH3_LOG_FILE` | `/var/log/ssh3.log` | Server log file |
+| `SSH3_LOG_LEVEL` | `info` | Log verbosity (`trace`, `debug`, `info`, `warn`, `error`) |
+| `LANG` | `C.UTF-8` | Locale forwarded to user shells |
+
+Apply changes with `sudo systemctl restart ssh3-server`.
+
+Both client and server accept QUIC transport tuning flags for bulk transfers: `-initial-packet-size` (initial QUIC packet size in bytes, default `1350`), `-stream-rx-mb` (per-stream flow-control receive window in MiB, default `8`), and `-conn-rx-mb` (connection-level receive window in MiB, default `16`).
 
 ## Windows client notes
 - Flags (such as `-privkey`) must come **before** the positional URL: Go's flag parser stops at the first positional argument.
@@ -359,3 +372,6 @@ GOFLAGS=-mod=mod go build ./...
 SSH3 is promising, but this project still needs substantial review before it should be trusted in production. The protocol surface combines TLS 1.3, QUIC, HTTP authorization, and SSH-style channel semantics, so the right standard is a long period of review and interoperability hardening, not “it seems to work on my machine”.
 
 Use it in labs, CI, private environments, and interop experiments. Do not rely on it yet as a drop-in production replacement for OpenSSH.
+
+## License
+The project is licensed under the [Apache License 2.0](LICENSE), inherited from the upstream [francoismichel/ssh3](https://github.com/francoismichel/ssh3) project. Modifications made by this fork, including the documentation, are distributed under the same Apache-2.0 terms.

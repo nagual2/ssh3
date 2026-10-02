@@ -19,7 +19,7 @@ Dieses Repository enthält derzeit zwei Implementierungen:
 > Betrachten Sie keine der Implementierungen als produktionsreif. Protokoll und Code befinden sich in aktiver Entwicklung; das Rust-Rewrite konzentriert sich in erster Linie auf Korrektheit und Interoperabilität, nicht auf Produktvollständigkeit.
 
 ## Über den nagual2-Fork
-Dieser Fork zielt darauf ab, die Go-Implementierung zu einem praktischen Alltagswerkzeug zu machen:
+Dieser Fork zielt darauf ab, die Go-Implementierung zu einem praktischen Alltagswerkzeug zu machen. Diese README basiert auf der README des Upstream-Projekts und wurde von den Fork-Maintainern geändert; nur den Fork betreffende Änderungen werden in [CHANGELOG.md](CHANGELOG.md) nachverfolgt:
 
 - **Der Windows-Client ist vollwertig.** Seit v0.1.8 kompiliert der Client für Windows und unterstützt interaktive PTY-Sitzungen: VT-Eingabe/-Ausgabe, UTF-8-Konsolcodepage, echte Konsolengröße, Weiterleitung von `SIGINT`/`SIGTERM` und einen 80x24-PTY-Fallback, wenn die Konsolengröße nicht ermittelt werden kann.
 - **Server-Pakete nur mit Schlüsselauthentifizierung.** Das Release-`.deb` liefert einen systemd-Dienst (`ssh3-server.service`, UDP 443, geheimer URL-Pfad), gebaut mit `-tags disable_password_auth`: Passwortauthentifizierung ist herauskompiliert, OIDC ist nicht konfiguriert, und das Post-Install-Skript erzeugt ein selbstsigniertes ed25519-Zertifikat mit IP/DNS-SANs.
@@ -41,10 +41,23 @@ Die Assets gibt es im [neuesten Release](https://github.com/nagual2/ssh3/release
 Installation des Debian-Pakets:
 
 ```bash
-sudo dpkg -i ssh3_0.1.14_amd64.deb
+sudo dpkg -i ssh3_0.1.21_amd64.deb
 ```
 
 Der Dienst lauscht auf UDP 443 unter dem geheimen URL-Pfad `/ssh3-term`. Die Konfiguration liegt in `/etc/ssh3/ssh3-server.env` (Logdatei und -level, `LANG`), die systemd-Unit in `/usr/lib/systemd/system/ssh3-server.service`; ein selbstsigniertes ed25519-Zertifikat mit IP/DNS-SANs wird bei der Installation in `/etc/ssh3/` erzeugt, falls es fehlt.
+
+### Serverkonfiguration
+Das Release-Paket wird über die systemd-`EnvironmentFile` unter `/etc/ssh3/ssh3-server.env` konfiguriert:
+
+| Variable | Standard | Zweck |
+| --- | --- | --- |
+| `SSH3_LOG_FILE` | `/var/log/ssh3.log` | Server-Logdatei |
+| `SSH3_LOG_LEVEL` | `info` | Log-Ausführlichkeit (`trace`, `debug`, `info`, `warn`, `error`) |
+| `LANG` | `C.UTF-8` | Locale, die an Benutzer-Shells weitergereicht wird |
+
+Änderungen anwenden: `sudo systemctl restart ssh3-server`.
+
+Client und Server akzeptieren QUIC-Tuning-Flags für Bulk-Transfers: `-initial-packet-size` (initiale QUIC-Paketgröße in Bytes, Standard `1350`), `-stream-rx-mb` (Flow-Control-Empfangsfenster pro Stream in MiB, Standard `8`) und `-conn-rx-mb` (Empfangsfenster auf Verbindungsebene in MiB, Standard `16`).
 
 ## Hinweise zum Windows-Client
 - Flags (z. B. `-privkey`) müssen **vor** der positionalen URL stehen: Gos Flag-Parser stoppt beim ersten positionalen Argument.
@@ -358,3 +371,6 @@ GOFLAGS=-mod=mod go build ./...
 SSH3 ist vielversprechend, aber das Projekt braucht noch erhebliche Prüfung, bevor man ihm in der Produktion vertrauen kann. Die Protokolloberfläche kombiniert TLS 1.3, QUIC, HTTP-Autorisierung und SSH-artige Kanalsemantik — der richtige Maßstab ist eine lange Phase von Reviews und Interop-Härtung, nicht „läuft auf meiner Maschine“.
 
 Nutzen Sie es in Labors, CI, privaten Umgebungen und Interop-Experimenten. Verlassen Sie sich noch nicht darauf als fertigen OpenSSH-Ersatz für die Produktion.
+
+## Lizenz
+Das Projekt steht unter der [Apache License 2.0](LICENSE), geerbt vom Upstream-Projekt [francoismichel/ssh3](https://github.com/francoismichel/ssh3). Die Änderungen dieses Forks, einschließlich der Dokumentation, werden zu denselben Apache-2.0-Bedingungen vertrieben.
