@@ -46,7 +46,30 @@ builds:
     ldflags:
       - -s -w
 
+  # amd64 server: CGO build with the shadow/crypt password backend compiled
+  # in. Password auth stays OFF by default (-enable-password-login or
+  # SSH3_ENABLE_PASSWORD_LOGIN=1). Needs gcc + libcrypt-dev on the runner.
   - id: server
+    main: ./cmd/ssh3-server/main.go
+    binary: ssh3-server
+    env:
+      - CGO_ENABLED=1
+      - GOFLAGS=-mod=mod
+    flags:
+      - -mod=mod
+    goos:
+      - linux
+    goarch:
+      - amd64
+    tags:
+      - osusergo
+      - netgo
+    ldflags:
+      - -s -w
+
+  # arm servers stay CGO-free key-only builds: CGO cross-compilation for
+  # arm/arm64 would require cross toolchains on the release runner.
+  - id: serverkeyonly
     main: ./cmd/ssh3-server/main.go
     binary: ssh3-server
     env:
@@ -57,7 +80,6 @@ builds:
     goos:
       - linux
     goarch:
-      - amd64
       - arm64
       - arm
     tags:
@@ -83,6 +105,7 @@ archives:
   - id: server
     builds:
       - server
+      - serverkeyonly
     formats:
       - tar.gz
     name_template: >-
@@ -97,20 +120,23 @@ nfpms:
     ids:
       - client
       - server
+      - serverkeyonly
     file_name_template: "{{ .ConventionalFileName }}"
     vendor: nagual2
     homepage: https://github.com/nagual2/ssh3
     maintainer: Max <max@localhost>
     description: |-
       SSH3 - Secure Shell over QUIC/HTTP-3 (server and client).
-      Key-only authentication build: password auth is compiled out
-      (disable_password_auth build tag), no OIDC configured.
+      Password authentication is available on amd64 and disabled by default
+      (enable via -enable-password-login or SSH3_ENABLE_PASSWORD_LOGIN=1
+      in /etc/ssh3/ssh3-server.env). arm builds are key-only; no OIDC configured.
     license: Apache-2.0
     formats:
       - deb
     dependencies:
       - openssl
       - systemd
+      - libcrypt1
     bindir: /usr/bin
     contents:
       - src: packaging/ssh3-server.service

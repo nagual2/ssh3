@@ -885,9 +885,11 @@ func ServerMain() int {
 		"If certificates have already been generated previously using this flag, "+
 		"they will simply be reused without being regenerated. The public certificates are automatically renewed as long as the "+
 		"server is running. Automatically-generated IP public certificates are not available yet.")
-	enablePasswordLogin := false
+	// The env default lets systemd EnvironmentFile installs opt into password
+	// auth without editing the unit's ExecStart; the flag overrides it.
+	enablePasswordLogin, _ := strconv.ParseBool(os.Getenv("SSH3_ENABLE_PASSWORD_LOGIN"))
 	if unix_util.PasswordAuthAvailable() {
-		flag.BoolVar(&enablePasswordLogin, "enable-password-login", false, "if set, enable password authentication (disabled by default)")
+		flag.BoolVar(&enablePasswordLogin, "enable-password-login", enablePasswordLogin, "if set, enable password authentication (disabled by default; SSH3_ENABLE_PASSWORD_LOGIN=1 sets it too)")
 	}
 	flag.Parse()
 

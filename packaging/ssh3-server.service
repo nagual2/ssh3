@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [Unit]
-Description=SSH3 server (QUIC/HTTP-3, key-only auth)
+Description=SSH3 server (QUIC/HTTP-3, keys by default)
 Documentation=https://github.com/nagual2/ssh3
 After=network-online.target
 Wants=network-online.target
@@ -21,8 +21,10 @@ KillMode=process
 # CapabilityBoundingSet / NoNewPrivileges / Protect* / Restrict* apply to the
 # whole cgroup, so they would clip capabilities that sudo regains inside a
 # session — root could not run tcpdump, trafshow, modprobe or sysctl (EPERM),
-# which OpenSSH sessions can. The trust boundary is key-only auth
-# (disable_password_auth build tag), not unit-level sandboxing. This mirrors
-# Debian's ssh.service, which ships no such directives either.
+# which OpenSSH sessions can. The trust boundary is key-based auth by
+# default: password auth is compiled in on amd64 but disabled unless
+# -enable-password-login (or SSH3_ENABLE_PASSWORD_LOGIN=1 in
+# /etc/ssh3/ssh3-server.env) is set. This mirrors Debian's ssh.service,
+# which ships no such directives either.
 [Install]
 WantedBy=multi-user.target
