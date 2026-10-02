@@ -98,3 +98,52 @@ func TestOpenForwardRejectsGarbage(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowChangeRoundTrip(t *testing.T) {
+	in := &WindowChange{Columns: 200, Rows: 50, PixelWidth: 1600, PixelHeight: 800}
+	b := in.Encode()
+	if len(b) != 16 {
+		t.Fatalf("encoded length = %d, want 16", len(b))
+	}
+	out := &WindowChange{}
+	if err := out.Decode(b); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if *in != *out {
+		t.Fatalf("round trip mismatch: in = %+v, out = %+v", in, out)
+	}
+}
+
+func TestWindowChangeRejectsGarbage(t *testing.T) {
+	for _, payload := range [][]byte{{}, make([]byte, 15), make([]byte, 17)} {
+		if err := (&WindowChange{}).Decode(payload); err == nil {
+			t.Fatalf("decode(len=%d) succeeded, want error", len(payload))
+		}
+	}
+}
+
+func TestSignalRoundTrip(t *testing.T) {
+	in := &Signal{Name: "TERM"}
+	b := in.Encode()
+	out := &Signal{}
+	if err := out.Decode(b); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if *in != *out {
+		t.Fatalf("round trip mismatch: in = %+v, out = %+v", in, out)
+	}
+}
+
+func TestSignalRejectsGarbage(t *testing.T) {
+	good := (&Signal{Name: "HUP"}).Encode()
+	cases := map[string][]byte{
+		"empty":            {},
+		"truncated valid":  good[:len(good)-1],
+		"trailing garbage": append(append([]byte{}, good...), 0xde, 0xad),
+	}
+	for name, payload := range cases {
+		if err := (&Signal{}).Decode(payload); err == nil {
+			t.Fatalf("%s: decode succeeded, want error", name)
+		}
+	}
+}

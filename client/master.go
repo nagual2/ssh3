@@ -19,6 +19,7 @@ import (
 
 	"github.com/francoismichel/ssh3"
 	"github.com/francoismichel/ssh3/client/cm"
+	ssh3Messages "github.com/francoismichel/ssh3/message"
 )
 
 // MasterOptions configures the control-master lifecycle (stage 3.5,
@@ -342,6 +343,55 @@ func masterOpenForward(ctx context.Context, c *Client, typ cm.MsgType, fwd *cm.O
 	}
 }
 
+// relaySlaveInteractions dispatches slave interaction frames (window
+// changes, signals) from the session control connection to the ssh3 channel,
+// mirroring what a direct client sends itself.
+func relaySlaveInteractions(control net.Conn, channel ssh3.Channel) {
+	for {
+		typ, payload, err := cm.ReadFrame(control)
+		if err != nil {
+			return
+		}
+		switch typ {
+		case cm.MsgWindowChange:
+			var wc cm.WindowChange
+			if err := wc.Decode(payload); err != nil {
+				log.Debug().Msgf("master: malformed WINDOW_CHANGE: %v", err)
+				continue
+			}
+			if err := channel.SendRequest(&ssh3Messages.ChannelRequestMessage{
+				WantReply: false,
+				ChannelRequest: &ssh3Messages.WindowChangeRequest{
+					CharWidth:   uint64(wc.Columns),
+					CharHeight:  uint64(wc.Rows),
+					PixelWidth:  uint64(wc.PixelWidth),
+					PixelHeight: uint64(wc.PixelHeight),
+				},
+			}); err != nil {
+				log.Debug().Msgf("master: could not forward window change: %v", err)
+				return
+			}
+		case cm.MsgSignal:
+			var sig cm.Signal
+			if err := sig.Decode(payload); err != nil {
+				log.Debug().Msgf("master: malformed SIGNAL: %v", err)
+				continue
+			}
+			if err := channel.SendRequest(&ssh3Messages.ChannelRequestMessage{
+				WantReply: false,
+				ChannelRequest: &ssh3Messages.SignalRequest{
+					SignalNameWithoutSig: sig.Name,
+				},
+			}); err != nil {
+				log.Debug().Msgf("master: could not forward signal %s: %v", sig.Name, err)
+				return
+			}
+		default:
+			// not an interaction frame (or from a newer protocol): ignore
+		}
+	}
+}
+
 // runMasterBridge relays one session: the io attachment carries slave stdin
 // upstream and session stdout downstream, the stderr attachment carries the
 // session's stderr. When the channel ends, the exit status goes back on the
@@ -357,6 +407,11 @@ func runMasterBridge(sess *cmSession, ioConn, errConn net.Conn,
 		delete(sessions, sess.token)
 		mu.Unlock()
 	}()
+
+	// slave interaction frames (window changes, signals) arrive on the
+	// control connection while the bridge pumps the streams; an old slave
+	// sends nothing here and an unknown frame type is ignored
+	go relaySlaveInteractions(sess.control, sess.channel)
 
 	err := pumpSessionStreams(sess.channel, sessionIO{
 		stdin:  ioConn,

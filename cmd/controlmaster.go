@@ -57,8 +57,9 @@ func startDetachedMaster() error {
 
 // runSlaveCommand runs one session through the control master with the
 // process stdio. Interactive sessions request a pty through the master and
-// set the local console raw; window changes and signals are not forwarded
-// through the control channel yet.
+// set the local console raw; window changes and out-of-band signals are
+// relayed to the master as control frames (raw-mode input bytes reach the
+// remote pty through the io stream).
 func runSlaveCommand(ctx context.Context, controlPath string, command []string, tty *os.File) int {
 	spec := client.SessionSpec{Command: command}
 	if len(command) == 0 && tty != nil && term.IsTerminal(int(tty.Fd())) {
@@ -88,7 +89,7 @@ func runSlaveCommand(ctx context.Context, controlPath string, command []string, 
 		}
 		defer fmt.Printf("\r")
 	}
-	code, err := client.RunSlaveSession(ctx, controlPath, spec, os.Stdin, os.Stdout, os.Stderr)
+	code, err := client.RunSlaveSession(ctx, controlPath, spec, os.Stdin, os.Stdout, os.Stderr, tty)
 	if err != nil {
 		log.Error().Msgf("control-master session: %s", err)
 		return -1

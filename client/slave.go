@@ -10,15 +10,18 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 
 	"github.com/francoismichel/ssh3/client/cm"
 )
 
 // RunSlaveSession requests a session from the ControlMaster listening on
-// controlPath and bridges the given local streams into it. It returns the
-// remote exit status (255 for signals or transport failures).
+// controlPath and bridges the given local streams into it. tty (may be nil)
+// enables interaction relay for pty sessions: terminal resizes and
+// out-of-band signals are forwarded to the master as control frames. It
+// returns the remote exit status (255 for signals or transport failures).
 func RunSlaveSession(ctx context.Context, controlPath string, spec SessionSpec,
-	stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	stdin io.Reader, stdout, stderr io.Writer, tty *os.File) (int, error) {
 
 	payload, err := encodeOpenSessionRequest(spec)
 	if err != nil {
@@ -55,6 +58,12 @@ func RunSlaveSession(ctx context.Context, controlPath string, spec SessionSpec,
 		return -1, err
 	}
 	defer ioConn.Close()
+
+	if spec.Pty != nil && tty != nil {
+		if stopRelay := relaySlaveTTYEvents(control, tty); stopRelay != nil {
+			defer stopRelay()
+		}
+	}
 
 	// slave stdin upstream; a closed write half tells the master's pump the
 	// input is complete without tearing down the stdout direction

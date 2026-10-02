@@ -17,7 +17,8 @@ import (
 const Version = 1
 
 // MsgType enumerates control frames. Slave→master: Hello, OpenSession,
-// OpenForwardTCP, OpenForwardUDP, Exit. Master→slave: OK, Error.
+// OpenForwardTCP, OpenForwardUDP, Exit, WindowChange, Signal. Master→slave:
+// OK, Error, ExitStatus.
 type MsgType uint8
 
 const (
@@ -30,6 +31,8 @@ const (
 	MsgError          MsgType = 7
 	MsgAttach         MsgType = 8
 	MsgExitStatus     MsgType = 9
+	MsgWindowChange   MsgType = 10
+	MsgSignal         MsgType = 11
 )
 
 // magic tags every frame so a garbage dialer (HTTP probe, stray client)

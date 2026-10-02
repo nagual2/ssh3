@@ -104,7 +104,7 @@ func TestControlMasterSlaveSessionIntegration(t *testing.T) {
 	t.Run("exec output and status", func(t *testing.T) {
 		var out, errBuf strings.Builder
 		code, err := RunSlaveSession(ctx, sockPath, SessionSpec{Command: []string{"echo", "cm-increment3-ok"}},
-			strings.NewReader(""), &out, &errBuf)
+			strings.NewReader(""), &out, &errBuf, nil)
 		if err != nil {
 			t.Fatalf("slave session: %v", err)
 		}
@@ -122,7 +122,7 @@ func TestControlMasterSlaveSessionIntegration(t *testing.T) {
 		// quoted "exit 7" would arrive unquoted; use a command whose exit
 		// code needs no quoting
 		code, err := RunSlaveSession(ctx, sockPath, SessionSpec{Command: []string{"false"}},
-			strings.NewReader(""), &out, &errBuf)
+			strings.NewReader(""), &out, &errBuf, nil)
 		if err != nil {
 			t.Fatalf("slave session: %v", err)
 		}
@@ -134,7 +134,7 @@ func TestControlMasterSlaveSessionIntegration(t *testing.T) {
 	t.Run("stdin bridging", func(t *testing.T) {
 		var out, errBuf strings.Builder
 		code, err := RunSlaveSession(ctx, sockPath, SessionSpec{Command: []string{"cat"}},
-			strings.NewReader("ping-through-master"), &out, &errBuf)
+			strings.NewReader("ping-through-master"), &out, &errBuf, nil)
 		if err != nil {
 			t.Fatalf("slave session: %v", err)
 		}
@@ -250,7 +250,7 @@ func TestControlMasterSlaveSessionIntegration(t *testing.T) {
 		}
 		// and a new slave cannot reach it
 		if _, err := RunSlaveSession(ctx, sockPath, SessionSpec{Command: []string{"true"}},
-			strings.NewReader(""), io.Discard, io.Discard); err == nil {
+			strings.NewReader(""), io.Discard, io.Discard, nil); err == nil {
 			t.Fatalf("slave session succeeded after master exit, want failure")
 		}
 	})

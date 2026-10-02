@@ -99,6 +99,58 @@ func DecodeExitStatus(payload []byte) (uint64, error) {
 	return binary.BigEndian.Uint64(payload), nil
 }
 
+// WindowChange relays a slave terminal resize for a bridged session.
+type WindowChange struct {
+	Columns     uint32
+	Rows        uint32
+	PixelWidth  uint32
+	PixelHeight uint32
+}
+
+// Encode marshals the message (4 big-endian uint32s).
+func (m *WindowChange) Encode() []byte {
+	b := binary.BigEndian.AppendUint32(nil, m.Columns)
+	b = binary.BigEndian.AppendUint32(b, m.Rows)
+	b = binary.BigEndian.AppendUint32(b, m.PixelWidth)
+	return binary.BigEndian.AppendUint32(b, m.PixelHeight)
+}
+
+// Decode unmarshals the message; malformed or trailing input is an error.
+func (m *WindowChange) Decode(payload []byte) error {
+	if len(payload) != 16 {
+		return errShort
+	}
+	m.Columns = binary.BigEndian.Uint32(payload)
+	m.Rows = binary.BigEndian.Uint32(payload[4:])
+	m.PixelWidth = binary.BigEndian.Uint32(payload[8:])
+	m.PixelHeight = binary.BigEndian.Uint32(payload[12:])
+	return nil
+}
+
+// Signal relays a slave-side signal for a bridged session. Name is the bare
+// signal name without the SIG prefix ("INT", "TERM", ...), like SSH2.
+type Signal struct {
+	Name string
+}
+
+// Encode marshals the message.
+func (m *Signal) Encode() []byte {
+	return appendStr(nil, m.Name)
+}
+
+// Decode unmarshals the message; malformed or trailing input is an error.
+func (m *Signal) Decode(payload []byte) error {
+	name, b, err := readStr(payload)
+	if err != nil {
+		return err
+	}
+	if len(b) != 0 {
+		return errTrailing
+	}
+	m.Name = name
+	return nil
+}
+
 func appendStr(b []byte, s string) []byte {
 	b = binary.BigEndian.AppendUint32(b, uint32(len(s)))
 	return append(b, s...)
