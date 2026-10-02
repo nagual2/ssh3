@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -959,6 +960,10 @@ func ServerMain() int {
 	if *verbose {
 		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
 		util.ConfigureLogger("debug")
+	} else if os.Getenv("INVOCATION_ID") != "" {
+		// running under systemd: emit plain JSON lines to stderr so journald
+		// captures structured, colorless records; the log file is skipped
+		util.ConfigureLogger(os.Getenv("SSH3_LOG_LEVEL"))
 	} else {
 		util.ConfigureLogger(os.Getenv("SSH3_LOG_LEVEL"))
 
@@ -1210,13 +1215,37 @@ func ServerMain() int {
 		log.Error().Msgf("error while starting the QUIC listener: %s", err)
 		return -1
 	}
+
+	// graceful shutdown (stage 3): SIGTERM/SIGINT stop accepting new
+	// connections, then active connections drain up to SSH3_SHUTDOWN_DRAIN
+	// seconds (default 5, 0 closes them immediately) before being terminated
+	serveCtx, stopServe := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopServe()
+
+	var conns sync.WaitGroup
+	var connsMu sync.Mutex
+	activeConns := make(map[*quic.Conn]struct{})
 	for {
-		qconn, err := listener.Accept(context.Background())
+		qconn, err := listener.Accept(serveCtx)
 		if err != nil {
+			if serveCtx.Err() != nil {
+				log.Info().Msgf("shutdown signal received: no longer accepting new connections")
+				break
+			}
 			log.Error().Msgf("error while accepting a QUIC connection: %s", err)
 			return -1
 		}
+		connsMu.Lock()
+		activeConns[qconn] = struct{}{}
+		connsMu.Unlock()
+		conns.Add(1)
 		go func() {
+			defer conns.Done()
+			defer func() {
+				connsMu.Lock()
+				delete(activeConns, qconn)
+				connsMu.Unlock()
+			}()
 			hconn, err := server.NewRawServerConn(qconn)
 			if err != nil {
 				log.Error().Msgf("could not create the HTTP/3 connection: %s", err)
@@ -1228,4 +1257,45 @@ func ServerMain() int {
 			}
 		}()
 	}
+	listener.Close()
+
+	drain := shutdownDrainPeriod()
+	if drain > 0 {
+		log.Info().Msgf("shutdown: draining active connections up to %s", drain)
+		drained := make(chan struct{})
+		go func() {
+			conns.Wait()
+			close(drained)
+		}()
+		select {
+		case <-drained:
+			log.Info().Msgf("shutdown: all connections finished")
+		case <-time.After(drain):
+			connsMu.Lock()
+			remaining := len(activeConns)
+			for qc := range activeConns {
+				qc.CloseWithError(quic.ApplicationErrorCode(0), "server shutdown")
+			}
+			connsMu.Unlock()
+			log.Info().Msgf("shutdown: drain timeout, closing %d remaining connections", remaining)
+		}
+	}
+	log.Info().Msgf("shutdown complete")
+	return 0
+}
+
+// shutdownDrainPeriod returns the graceful-shutdown drain window: how long
+// the server waits for active connections after a shutdown signal before
+// closing them. Configured by SSH3_SHUTDOWN_DRAIN in seconds; the default
+// is 5, a negative or unparsable value falls back to the default.
+func shutdownDrainPeriod() time.Duration {
+	if v := os.Getenv("SSH3_SHUTDOWN_DRAIN"); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil {
+			if secs >= 0 {
+				return time.Duration(secs) * time.Second
+			}
+		}
+		log.Warn().Msgf("invalid SSH3_SHUTDOWN_DRAIN %q, using the default", v)
+	}
+	return 5 * time.Second
 }

@@ -71,7 +71,7 @@ func ConfigureLogger(logLevel string) {
 	case "warning":
 		zerolog.SetGlobalLevel(zerolog.WarnLevel)
 	case "error":
-		zerolog.SetGlobalLevel(zerolog.WarnLevel)
+		zerolog.SetGlobalLevel(zerolog.ErrorLevel)
 	default:
 		zerolog.SetGlobalLevel(zerolog.WarnLevel)
 	}
