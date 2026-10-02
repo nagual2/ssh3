@@ -67,11 +67,23 @@ Acceptance: copy a 1 GiB tree with subdirectories over a lossy link (simulate wi
 
 ## 6. Stage 3 — Daily-driver features (P2)
 
-1. Host key verification story: TOFU mode writing QUIC/TLS certificates to `~/.ssh3/known_hosts` (format already parsed by the client — `ssh3.ParseKnownHosts`), `strict` and `--insecure` explicitly logged as dangerous. Pin by certificate fingerprint, support SSHFP-like DNS records as stretch goal.
-2. Rust CLI parity with Go: port forwarding flags (TCP/UDP direct + reverse), proxy jump, secret URL path.
-3. `~/.ssh/config`: extend parsing to `ProxyJump`, `ForwardAgent`, `ServerAliveInterval`, `Include`, `Match` (currently only Hostname/User/Port/IdentityFile).
-4. Keepalives and connection migration sanity: NAT rebinding should not kill a session (QUIC gives this for free only if transport config enables migration — verify and test).
-5. Server ops: graceful shutdown on SIGTERM (finish active channels, configurable drain), systemd hardening docs (unit example with `ProtectSystem`, `PrivateTmp`), log to journald-friendly output.
+Status 2026-10-02 (v0.1.22 release):
+
+1. Host key verification story: TOFU mode writing QUIC/TLS certificates to `~/.ssh3/known_hosts` (format already parsed by the client — `ssh3.ParseKnownHosts`), `strict` and `--insecure` explicitly logged as dangerous. Pin by certificate fingerprint, support SSHFP-like DNS records as stretch goal. — **open (TOFU prompt + pinning exist since the fork start; `strict` mode, fingerprint pinning and SSHFP remain)**
+2. Rust CLI parity with Go: port forwarding flags (TCP/UDP direct + reverse), proxy jump, secret URL path. — **open (Rust track deferred beyond v0.1.22)**
+3. `~/.ssh/config`: extend parsing to `ProxyJump`, `ForwardAgent`, `ServerAliveInterval`, `Include`, `Match` (currently only Hostname/User/Port/IdentityFile). — **done 2026-10-02 except `Match`** (ProxyJump honored as UDPProxyJump alias; Include resolves via ssh_config v1.2.0; Match deferred)
+4. Keepalives and connection migration sanity: NAT rebinding should not kill a session (QUIC gives this for free only if transport config enables migration — verify and test). — **done 2026-10-02 by inspection** (quic-go v0.63 always enables active migration — the Config knob was removed; keepalive default 1s, overridable via ServerAliveInterval)
+5. Server ops: graceful shutdown on SIGTERM (finish active channels, configurable drain), systemd hardening docs (unit example with `ProtectSystem`, `PrivateTmp`), log to journald-friendly output. — **done 2026-10-02** (SIGTERM drain via `SSH3_SHUTDOWN_DRAIN`, default 5s; JSON-to-journald under systemd; unit deliberately keeps OpenSSH parity without Protect* — see packaging/ssh3-server.service comment)
+
+Additional v0.1.22 stage-3 items beyond this list:
+
+- Password backend compiled into the amd64 release server (off by default; `-enable-password-login` / `SSH3_ENABLE_PASSWORD_LOGIN=1`) — release packaging item, pairs with Stage 4.2 below.
+- `-N` (no-session forwarding-only mode).
+- Control master: window-change and signal relay for pty slaves (new WINDOW_CHANGE/SIGNAL control frames).
+- Control master + proxy-jump is now an explicit client error (was a silent bypass).
+- Transfer bug 6 fixed: server-absolute remote paths honored by the sftp jail; missing remote parents auto-created.
+
+Reverse forwarding (`-R`) — **deferred with rationale**: the wire protocol already carries server-initiated channels (the agent-connection channel, cmd/ssh3-server.go), but a forward-request mechanism (an ssh2 `tcpip-forward` global-request analog) does not exist. Sketch for the next cycle: (1) new conversation-level control message `REQUEST_REVERSE_FORWARD {bind_addr, bind_port, target_addr, proto: tcp|udp}` sent by the client on the control stream; (2) server binds and, per accepted conn/datagram, opens a `forwarded-tcp`/`forwarded-udp` channel whose additional bytes carry the client-side target; (3) client channel manager learns to accept these types and bridges to local targets; (4) additive wire change, old clients reject unknown channel types gracefully — verify before shipping.
 
 ## 6a. Stage 1.5 — Data-path performance — P1, pilot-prioritized 2026-09-29
 

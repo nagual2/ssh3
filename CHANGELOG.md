@@ -6,11 +6,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); eac
 
 ## [Unreleased]
 
+### Deferred
+- Reverse forwarding (`-R`, remote-side listener bridged back to the client): the wire protocol already carries server-initiated channels (the agent channel uses them), but a forward-request mechanism (an ssh2 `tcpip-forward` analog) does not exist yet and is a protocol extension. Design sketch lives in CTO_TASK.
+
+## [0.1.22] - 2026-10-02
+
 ### Added
 - `SSH3_ENABLE_PASSWORD_LOGIN` server environment variable as the default for `-enable-password-login`, so systemd `EnvironmentFile` installs can opt into password auth without editing the unit.
+- Client flag `-N`: hold the connection open for the forwards without running a session or shell.
+- Control master: pty slave sessions now relay terminal resizes (SIGWINCH) and out-of-band signals through the master onto the ssh3 channel; raw-mode input bytes keep flowing through the io stream.
+- `~/.ssh/config` extensions: `ServerAliveInterval` tunes the QUIC keepalive (default 1s), `ForwardAgent yes` defaults the `-forward-agent` flag, `ProxyJump` is honored as an alias of the fork's `UDPProxyJump`; `Include` directives resolve via ssh_config v1.2.0.
+- Server: graceful shutdown on SIGTERM/SIGINT — stop accepting, drain active connections up to `SSH3_SHUTDOWN_DRAIN` seconds (default 5, `0` closes immediately), exit 0. Under systemd, non-verbose logging emits plain JSON to stderr (journald-friendly, no ANSI colors).
 
 ### Changed
 - The amd64 release server is now built with CGO and the shadow/crypt password backend compiled in; password auth stays disabled by default and is enabled with `-enable-password-login` or persistently via `SSH3_ENABLE_PASSWORD_LOGIN=1` in `/etc/ssh3/ssh3-server.env`. arm server builds remain key-only (`disable_password_auth`).
+- `-control-master` combined with `-proxy-jump` (from the command line or `~/.ssh/config`) is now an explicit error instead of a silent bypass.
+
+### Fixed
+- `ssh3 -f` honors server-absolute remote paths (e.g. `/home/user/file`), which previously failed with "file does not exist"; missing remote parent directories are auto-created on single-file uploads.
+- The logger mapped the `error` level to `WarnLevel`.
 
 ### Performance
 - Control master: fast slave path when an explicit `-control-path` is given.

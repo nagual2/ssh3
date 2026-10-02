@@ -41,7 +41,7 @@ Grab the assets from the [latest release](https://github.com/nagual2/ssh3/releas
 Install the Debian package:
 
 ```bash
-sudo dpkg -i ssh3_0.1.21_amd64.deb
+sudo dpkg -i ssh3_0.1.22_amd64.deb
 ```
 
 The service listens on UDP 443 under the secret URL path `/ssh3-term`. Configuration lives in `/etc/ssh3/ssh3-server.env` (log file and level, `LANG`), the systemd unit in `/usr/lib/systemd/system/ssh3-server.service`, and a self-signed ed25519 certificate with IP/DNS SANs is generated in `/etc/ssh3/` on install if missing.
@@ -251,9 +251,37 @@ Notes: the master is a detached copy of this binary (`SSH3_CM_DAEMON=1`);
 every slave session, TCP/UDP forward and agent forwarding is multiplexed
 over the master's single QUIC connection. The measured median of 100
 sequential execs drops from ~130 ms (cold, one handshake each) to ~24 ms
-(~17%) with exactly one handshake. Limitations: window changes and signals
-are not forwarded through the master yet, `-proxy-jump` is incompatible,
-Windows is not supported.
+(~17%) with exactly one handshake. Limitations: `-proxy-jump` is
+incompatible (mixing it with `-control-master` is an error), Windows is not
+supported. Interactive pty slave sessions relay terminal resizes and
+out-of-band signals through the master.
+
+## Port forwarding
+Local TCP and UDP forwards run on the client, bridged over the ssh3
+connection (`local_port/remote_ip@remote_port`):
+
+```bash
+ssh3 -forward-tcp 8080/10.0.0.10@80 user@host
+ssh3 -forward-udp 5353/192.0.2.1@53 user@host
+```
+
+`-N` holds the connection open for the forwards without running a session;
+`Ctrl+C` tears it down:
+
+```bash
+ssh3 -N -forward-tcp 8080/10.0.0.10@80 user@host
+```
+
+Reverse forwarding (`-R`, a listener on the remote side) is not implemented
+yet; see Known Gaps.
+
+## Client configuration (~/.ssh/config)
+Beyond `HostName`, `Port`, `User`, and `IdentityFile`, the client honors per
+`Host` pattern: `ProxyJump` (interpreted as an ssh3 UDP proxy jump: the jump
+host must run ssh3-server), `UDPProxyJump` (fork extension, same semantics),
+`ForwardAgent`, and `ServerAliveInterval` (seconds; tunes the QUIC
+keepalive, default 1). `Include` directives are resolved by the config
+library; `Match` is not supported yet.
 
 ## Authentication
 ### Public key
@@ -381,6 +409,7 @@ GOFLAGS=-mod=mod go build ./...
 ```
 
 ## Known Gaps
+- Reverse forwarding (`-R`): the server cannot yet be asked to listen on a remote port and bridge connections back to the client; it needs a small protocol extension (see CHANGELOG).
 - The Rust server is intentionally minimal today: self-signed certificates only, no secret URL path, and no public certificate automation.
 - The Rust CLI does not yet expose TCP forwarding, UDP forwarding, or proxy jump flags even though the underlying runtime is implemented and tested.
 - The vendored `h3` patch is a deliberate compatibility shim for arbitrary `:protocol=ssh3` handling and still needs cleanup.

@@ -41,7 +41,7 @@ Die Assets gibt es im [neuesten Release](https://github.com/nagual2/ssh3/release
 Installation des Debian-Pakets:
 
 ```bash
-sudo dpkg -i ssh3_0.1.21_amd64.deb
+sudo dpkg -i ssh3_0.1.22_amd64.deb
 ```
 
 Der Dienst lauscht auf UDP 443 unter dem geheimen URL-Pfad `/ssh3-term`. Die Konfiguration liegt in `/etc/ssh3/ssh3-server.env` (Logdatei und -level, `LANG`), die systemd-Unit in `/usr/lib/systemd/system/ssh3-server.service`; ein selbstsigniertes ed25519-Zertifikat mit IP/DNS-SANs wird bei der Installation in `/etc/ssh3/` erzeugt, falls es fehlt.
@@ -250,9 +250,37 @@ Hinweise: der Master ist eine abgelöste Kopie dieses Binärprogramms
 Agent-Forwarding werden über die eine QUIC-Verbindung des Masters
 multiplext. Der Median von 100 aufeinanderfolgenden Execs sinkt von
 ~130 ms (kalt, je ein Handshake) auf ~24 ms (~17%) bei genau einem
-Handshake. Einschränkungen: Fensteränderungen und Signale werden noch
-nicht durch den Master weitergeleitet, `-proxy-jump` ist inkompatibel,
-Windows wird nicht unterstützt.
+Handshake. Einschränkungen: `-proxy-jump` ist inkompatibel (die Kombination
+mit `-control-master` ist ein Fehler), Windows wird nicht unterstützt.
+Interaktive pty-Slave-Sitzungen leiten Fensteränderungen und außerbandige
+Signale durch den Master.
+
+## Port-Weiterleitung
+Lokale TCP- und UDP-Weiterleitungen laufen auf dem Client und werden über die
+ssh3-Verbindung getunnelt (`lokaler_port/remote_ip@remote_port`):
+
+```bash
+ssh3 -forward-tcp 8080/10.0.0.10@80 user@host
+ssh3 -forward-udp 5353/192.0.2.1@53 user@host
+```
+
+`-N` hält die Verbindung für die Weiterleitungen offen, ohne eine Sitzung
+zu starten; `Strg+C` baut sie ab:
+
+```bash
+ssh3 -N -forward-tcp 8080/10.0.0.10@80 user@host
+```
+
+Rückwärtige Weiterleitung (`-R`, ein Listener auf dem Server) ist noch nicht
+implementiert; siehe „Bekannte Lücken“.
+
+## Client-Konfiguration (~/.ssh/config)
+Neben `HostName`, `Port`, `User` und `IdentityFile` berücksichtigt der Client
+pro `Host`-Muster: `ProxyJump` (als ssh3-UDP-Proxy-Jump interpretiert: der
+Jump-Host muss ssh3-server ausführen), `UDPProxyJump` (Fork-Erweiterung,
+gleiche Semantik), `ForwardAgent` und `ServerAliveInterval` (Sekunden;
+stimmt den QUIC-Keepalive ab, Standard 1). `Include`-Direktiven löst die
+Konfigurationsbibliothek auf; `Match` wird noch nicht unterstützt.
 
 ## Authentifizierung
 ### Public Key
@@ -380,6 +408,7 @@ GOFLAGS=-mod=mod go build ./...
 ```
 
 ## Bekannte Lücken
+- Rückwärtige Weiterleitung (`-R`): Der Server kann noch nicht gebeten werden, einen Remote-Port zu überwachen und Verbindungen zurück zum Client zu brücken; dafür ist eine kleine Protokollerweiterung nötig (siehe CHANGELOG).
 - Der Rust-Server ist heute bewusst minimal: nur selbstsignierte Zertifikate, kein geheimer URL-Pfad, keine Automatisierung öffentlicher Zertifikate.
 - Die Rust-CLI exponiert noch keine TCP-/UDP-Forwarding- oder Proxy-Jump-Flags, obwohl die Runtime implementiert und getestet ist.
 - Der vendored `h3`-Patch ist ein bewusster Kompatibilitäts-Shim für die beliebte `:protocol=ssh3`-Behandlung und muss noch aufgeräumt werden.
