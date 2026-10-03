@@ -1126,23 +1126,23 @@ func ServerMain() int {
 										case <-time.After(time.Second):
 										}
 										// The exit-status frame was written to the QUIC send
-										// stream, but it only becomes a packet when the stack's
-										// run loop assembles one. Closing the channel and the
-										// conversation immediately after the write tears the
-										// whole connection down before that happens, and a
-										// half-closing client then sees a bare EOF instead of
-										// the status (fast commands like `exit 42` lost it).
-										// QUIC exposes no flush callback, so yield briefly to
-										// let the packer pick the buffered frame up; the client
-										// still receives the status well before its next read
-										// would time out.
-										// The yield only guards the teardown below: a
-										// multiplexing conversation (control master) is not
-										// torn down here, and the sleep would add a flat
-										// 100ms to every slave session.
-										if !conv.IsMultiplexed() {
-											time.Sleep(100 * time.Millisecond)
-										}
+										// stream above; the stack flushes it without further
+										// help: a stream write wakes the connection run loop
+										// (SendStream.onHasStreamData -> Conn.scheduleSending),
+										// so the frame is packed and emitted within
+										// microseconds. QUIC exposes no flush callback, but
+										// none is needed: the teardown below (DrainAndClose)
+										// waits for the peer to close the connection, which
+										// only happens after the client read the status and
+										// the channel FIN (QUIC orders the FIN after the
+										// stream bytes, so a bare EOF without status is
+										// impossible on a live connection). An earlier 100ms
+										// yield here predates DrainAndClose: back then the
+										// conversation was closed right after the FIN and
+										// still-buffered frames were dropped; the drain
+										// window supersedes it, and the flat 100ms is no
+										// longer paid on every one-shot exec (the client
+										// drains the channel until the FIN before exiting).
 									}
 								}
 							}

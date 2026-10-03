@@ -98,14 +98,17 @@ func runSlaveCommand(ctx context.Context, controlPath string, command []string, 
 }
 
 // waitForMaster polls the control socket until a master answers or the
-// deadline passes.
+// deadline passes. The socket file appears when the master binds (net.Listen
+// creates it atomically), so attempts before that fail fast with ENOENT or
+// ECONNREFUSED; a 2ms poll keeps the slave startup at the millisecond scale
+// while each retry stays one cheap failed dial between sleeps (no busy-spin).
 func waitForMaster(ctx context.Context, controlPath string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for !client.PingMaster(ctx, controlPath) {
 		if time.Now().After(deadline) {
 			return false
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(2 * time.Millisecond)
 	}
 	return true
 }
