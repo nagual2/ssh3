@@ -69,9 +69,9 @@ Acceptance: copy a 1 GiB tree with subdirectories over a lossy link (simulate wi
 
 Status 2026-10-02 (v0.1.22 release):
 
-1. Host key verification story: TOFU mode writing QUIC/TLS certificates to `~/.ssh3/known_hosts` (format already parsed by the client — `ssh3.ParseKnownHosts`), `strict` and `--insecure` explicitly logged as dangerous. Pin by certificate fingerprint, support SSHFP-like DNS records as stretch goal. — **open (TOFU prompt + pinning exist since the fork start; `strict` mode, fingerprint pinning and SSHFP remain)**
+1. Host key verification story: TOFU mode writing QUIC/TLS certificates to `~/.ssh3/known_hosts` (format already parsed by the client — `ssh3.ParseKnownHosts`), `strict` and `--insecure` explicitly logged as dangerous. Pin by certificate fingerprint, support SSHFP-like DNS records as stretch goal. — **done 2026-10-04 except SSHFP** (`StrictHostKeyChecking` ask|yes|accept-new|no with OpenSSH-style source priority; pins compared on the server certificate, changed fingerprint refuses with both fingerprints; SSHFP DNS remains a stretch goal)
 2. Rust CLI parity with Go: port forwarding flags (TCP/UDP direct + reverse), proxy jump, secret URL path. — **open (Rust track deferred beyond v0.1.22)**
-3. `~/.ssh/config`: extend parsing to `ProxyJump`, `ForwardAgent`, `ServerAliveInterval`, `Include`, `Match` (currently only Hostname/User/Port/IdentityFile). — **done 2026-10-02 except `Match`** (ProxyJump honored as UDPProxyJump alias; Include resolves via ssh_config v1.2.0; Match deferred)
+3. `~/.ssh/config`: extend parsing to `ProxyJump`, `ForwardAgent`, `ServerAliveInterval`, `Include`, `Match` (currently only Hostname/User/Port/IdentityFile). — **done 2026-10-04** (ProxyJump honored as UDPProxyJump alias; Include resolves via ssh_config v1.2.0; Match resolved by the `client/config/matchcfg` pre-parser — all/final/host/originalhost/user/localuser/exec; `Match` inside `Include`d files is not resolved)
 4. Keepalives and connection migration sanity: NAT rebinding should not kill a session (QUIC gives this for free only if transport config enables migration — verify and test). — **done 2026-10-02 by inspection** (quic-go v0.63 always enables active migration — the Config knob was removed; keepalive default 1s, overridable via ServerAliveInterval)
 5. Server ops: graceful shutdown on SIGTERM (finish active channels, configurable drain), systemd hardening docs (unit example with `ProtectSystem`, `PrivateTmp`), log to journald-friendly output. — **done 2026-10-02** (SIGTERM drain via `SSH3_SHUTDOWN_DRAIN`, default 5s; JSON-to-journald under systemd; unit deliberately keeps OpenSSH parity without Protect* — see packaging/ssh3-server.service comment)
 
@@ -83,7 +83,7 @@ Additional v0.1.22 stage-3 items beyond this list:
 - Control master + proxy-jump is now an explicit client error (was a silent bypass).
 - Transfer bug 6 fixed: server-absolute remote paths honored by the sftp jail; missing remote parents auto-created.
 
-Reverse forwarding (`-R`) — **deferred with rationale**: the wire protocol already carries server-initiated channels (the agent-connection channel, cmd/ssh3-server.go), but a forward-request mechanism (an ssh2 `tcpip-forward` global-request analog) does not exist. Sketch for the next cycle: (1) new conversation-level control message `REQUEST_REVERSE_FORWARD {bind_addr, bind_port, target_addr, proto: tcp|udp}` sent by the client on the control stream; (2) server binds and, per accepted conn/datagram, opens a `forwarded-tcp`/`forwarded-udp` channel whose additional bytes carry the client-side target; (3) client channel manager learns to accept these types and bridges to local targets; (4) additive wire change, old clients reject unknown channel types gracefully — verify before shipping.
+Reverse forwarding (`-R`) — **done 2026-10-04**, with one deviation from the sketch below: the request travels as versioned channel data on a dedicated `reverse-forward` channel instead of a new conversation-level message type, because `message.ParseMessage` panics on unknown type IDs while unknown channel data is rejected cleanly by old peers (verified live against a v0.1.22 server and an old client against the new server). The server binds TCP/UDP (loopback default, wide binds warn) and opens `forwarded-tcp`/`forwarded-udp` channels carrying the target in the additional bytes; the client validates targets against the `-R` list and bridges to local endpoints. Two reliability blockers were fixed on the way: server conversation context now derives from the QUIC connection (was `context.Background()` — handlers hung in `AcceptChannel` forever), and `Client.Close()` closes the QUIC connection. Deferred remainder: GatewayPorts policy (wide binds currently warn only), per-user bind limits, UDP datagrams >1500 B truncated at the server socket. Original sketch kept for reference: (1) new conversation-level control message `REQUEST_REVERSE_FORWARD {bind_addr, bind_port, target_addr, proto: tcp|udp}` sent by the client on the control stream; (2) server binds and, per accepted conn/datagram, opens a `forwarded-tcp`/`forwarded-udp` channel whose additional bytes carry the client-side target; (3) client channel manager learns to accept these types and bridges to local targets; (4) additive wire change, old clients reject unknown channel types gracefully — verify before shipping.
 
 ## 6a. Stage 1.5 — Data-path performance — P1, pilot-prioritized 2026-09-29
 
@@ -107,6 +107,15 @@ Increments (measurement-driven; re-run B1/B2 after each):
 
 Non-goal: kernel TLS / crypto offload (impossible for QUIC). For no-AES-NI
 targets (Atom), evaluate ChaCha20-Poly1305 cipher agreement instead.
+
+**Pilot decision 2026-10-03:** the ≥250 MB/s throughput target is no longer
+chased — it is unreachable by small means against quic-go's userspace pipeline
+and OpenSSH's kernel-adjacent path. Priorities are functionality, reliability
+and minimal command latency (the fork is used as an MCP transport). The bulk
+throughput gap is the reason `project/ssh3-c` (C17 rewrite) exists. Delivered
+instead (2026-10-04): exec-latency pass — server teardown yield removed, master
+wait poll tightened, cold one-shot exec median 140→26 ms on loopback
+(`bench/exec-latency.sh`).
 
 ## 6b. Stage 3.5 — Connection multiplexing (ControlMaster) — P2, pilot-prioritized 2026-09-28
 

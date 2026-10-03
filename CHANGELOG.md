@@ -6,8 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); eac
 
 ## [Unreleased]
 
-### Deferred
-- Reverse forwarding (`-R`, remote-side listener bridged back to the client): the wire protocol already carries server-initiated channels (the agent channel uses them), but a forward-request mechanism (an ssh2 `tcpip-forward` analog) does not exist yet and is a protocol extension. Design sketch lives in CTO_TASK.
+### Added
+- **Reverse forwarding (`-R`)**: `-R [bind:]port[/udp]:target:targetport` asks the server to bind a TCP or UDP listener (loopback by default, wide binds warn, ephemeral ports report the actual port); every accepted connection or datagram comes back over a server-initiated `forwarded-tcp`/`forwarded-udp` channel and is bridged to the client-local target. Targets are validated against the `-R` list, forwarded channels are capped per conversation. Older peers reject the extension gracefully — verified live against a v0.1.22 server and an old client against the new server.
+- **`StrictHostKeyChecking`** (`ask|yes|accept-new|no`) with OpenSSH-style priority: CLI flag > `-o` > `~/.ssh/config` > `ask`. Known-host pins are compared on the server certificate after the dial; a changed fingerprint refuses the connection with both `SHA256:` fingerprints in the error; `accept-new` pins automatically; `no` explicitly allows cert changes with a warning.
+- **`~/.ssh/config` `Match` support**: criteria `all`, `final`, `host`, `originalhost`, `user`, `localuser`, `exec` (with `!` negation and globs), resolved by a pre-parser that flattens applicable blocks before the vendored ssh_config decoder; configs without `Match` take the untouched fast path.
+- `-o Key=Value` is now repeatable and validates known keys; `StrictHostKeyChecking` is accepted as a key.
+- `bench/exec-latency.sh`: measures cold one-shot, control-master spawn and warm slave exec latency.
+
+### Changed
+- Exec latency: the server no longer sleeps 100 ms before tearing down a non-multiplexed conversation, and the client polls for a spawning control master every 2 ms instead of 100 ms. Cold one-shot exec median on loopback: ~140 ms → ~26 ms; master-spawn first call ~112 ms → ~31 ms; warm slave path unchanged (~9 ms).
+
+### Fixed
+- Control master recovers a stale unix socket left behind by a SIGKILLed master instead of failing with `EADDRINUSE` for the full wait deadline (slaves hung 10 s and exited 255).
+- Server conversation handlers no longer hang in `AcceptChannel` forever when the QUIC connection dies; the conversation context now derives from the connection.
+- The client close path now also closes the QUIC connection, so the server learns of the client's departure promptly.
 
 ## [0.1.22] - 2026-10-02
 
