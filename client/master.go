@@ -13,6 +13,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -32,9 +33,18 @@ type MasterOptions struct {
 }
 
 // ListenControlMaster creates and prepares the control-master UDS listener
-// with 0600 permissions.
+// with 0600 permissions. A master killed with SIGKILL leaves its socket file
+// behind; the bind then fails with EADDRINUSE although nobody serves it, so
+// the file is unlinked and the bind retried once — but only after a dial
+// confirms nothing is listening (a live master always answers a connect).
 func ListenControlMaster(path string) (net.Listener, error) {
 	ln, err := net.Listen("unix", path)
+	if err != nil && errors.Is(err, syscall.EADDRINUSE) && !controlListenerAlive(path) {
+		if rmErr := os.Remove(path); rmErr == nil {
+			log.Debug().Msgf("removed stale control socket %s", path)
+			ln, err = net.Listen("unix", path)
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -43,6 +53,18 @@ func ListenControlMaster(path string) (net.Listener, error) {
 		return nil, err
 	}
 	return ln, nil
+}
+
+// controlListenerAlive reports whether anything listens on the control
+// socket: a successful dial (even before the master accepts it) proves a
+// live listener owns the path and the file must not be touched.
+func controlListenerAlive(path string) bool {
+	conn, err := net.DialTimeout("unix", path, time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
 
 // cmSession is one slave-requested session awaiting or running its bridge.
