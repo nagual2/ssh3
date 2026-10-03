@@ -2,12 +2,15 @@ package ssh3
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/x509"
 	"encoding/base64"
 	"fmt"
 	"os"
 	"strings"
 	"syscall"
+
+	"github.com/francoismichel/ssh3/util"
 )
 
 type KnownHosts map[string][]*x509.Certificate
@@ -18,6 +21,63 @@ func (kh KnownHosts) Knows(hostname string) bool {
 	}
 	_, ok := kh[hostname]
 	return ok
+}
+
+// HostCertificateStatus expresses how a certificate presented by a server
+// relates to the certificates pinned in known_hosts for that host.
+type HostCertificateStatus int
+
+const (
+	// HostCertificateUnknown means no certificate is pinned for this host yet.
+	HostCertificateUnknown HostCertificateStatus = iota
+	// HostCertificateMatches means the presented certificate is exactly the
+	// pinned one (same DER bytes).
+	HostCertificateMatches
+	// HostCertificateChanged means certificates are pinned for this host but
+	// none matches the presented one: the server key changed, which can be a
+	// machine-in-the-middle attack.
+	HostCertificateChanged
+)
+
+// HasCertificate reports whether cert is exactly one of the certificates
+// pinned for hostname (comparison on the raw DER bytes, i.e. on the SHA-256
+// fingerprint, since the fingerprint is a hash of those bytes).
+func (kh KnownHosts) HasCertificate(hostname string, cert *x509.Certificate) bool {
+	return kh.CheckCertificate(hostname, cert) == HostCertificateMatches
+}
+
+// CheckCertificate classifies a presented certificate against the
+// certificates pinned for hostname.
+func (kh KnownHosts) CheckCertificate(hostname string, cert *x509.Certificate) HostCertificateStatus {
+	if cert == nil {
+		return HostCertificateUnknown
+	}
+	certs, ok := kh[hostname]
+	if !ok || len(certs) == 0 {
+		return HostCertificateUnknown
+	}
+	for _, pinned := range certs {
+		if pinned != nil && bytes.Equal(pinned.Raw, cert.Raw) {
+			return HostCertificateMatches
+		}
+	}
+	return HostCertificateChanged
+}
+
+// Fingerprints returns the SHA-256 fingerprints of the certificates pinned
+// for hostname, in the "SHA256:<base64>" form used in error messages.
+func (kh KnownHosts) Fingerprints(hostname string) []string {
+	certs, ok := kh[hostname]
+	if !ok {
+		return nil
+	}
+	fingerprints := make([]string, 0, len(certs))
+	for _, cert := range certs {
+		if cert != nil {
+			fingerprints = append(fingerprints, "SHA256:"+util.Sha256Fingerprint(cert.Raw))
+		}
+	}
+	return fingerprints
 }
 
 type InvalidKnownHost struct {
@@ -38,6 +98,7 @@ func ParseKnownHosts(filename string) (knownHosts KnownHosts, invalidLines []int
 	if err != nil {
 		return nil, nil, err
 	}
+	defer file.Close()
 	scanner := bufio.NewScanner(file)
 
 	for i := 0; scanner.Scan(); i++ {
@@ -70,6 +131,7 @@ func AppendKnownHost(filename string, host string, cert *x509.Certificate) error
 	if err != nil {
 		return err
 	}
+	defer knownHosts.Close()
 	_, err = knownHosts.WriteString(fmt.Sprintf("%s x509-certificate %s\n", host, encodedCert))
 	if err != nil {
 		return err

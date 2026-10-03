@@ -30,6 +30,7 @@ import (
 	"github.com/francoismichel/ssh3/auth/oidc"
 	"github.com/francoismichel/ssh3/client"
 	client_config "github.com/francoismichel/ssh3/client/config"
+	matchcfg "github.com/francoismichel/ssh3/client/config/matchcfg"
 	"github.com/francoismichel/ssh3/internal"
 	pprofutil "github.com/francoismichel/ssh3/internal/pprofutil"
 	"github.com/francoismichel/ssh3/util"
@@ -37,7 +38,6 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/crypto/ssh/agent"
 
-	"github.com/kevinburke/ssh_config"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -66,6 +66,7 @@ type quicTuning struct {
 }
 
 func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog io.Writer, ssh3Dir string, certPool *x509.CertPool, knownHostsPath string, knownHosts ssh3.KnownHosts,
+	strictHostKeyChecking ssh3.StrictHostKeyChecking,
 	oidcConfig []*oidc.OIDCConfig, options *client_config.Config, proxyRemoteAddr *net.UDPAddr, tty *os.File, tuning quicTuning) (*quic.Conn, int) {
 
 	var err error
@@ -120,7 +121,8 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 		qconf.KeepAlivePeriod = tuning.KeepAlivePeriod
 	}
 
-	if certs, ok := knownHosts[options.CanonicalHostFormat()]; ok {
+	hostKey := options.CanonicalHostFormat()
+	if certs, ok := knownHosts[hostKey]; ok {
 		foundSelfsignedSSH3 := false
 
 		for _, cert := range certs {
@@ -139,91 +141,212 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 		}
 	}
 
+	// trustCertificate makes the next handshake verify the server against cert:
+	// the certificate is added to the pool and, when it fits the .ssh3
+	// self-signed naming, ServerName is switched so that hostname verification
+	// can succeed without IP SANs.
+	trustCertificate := func(cert *x509.Certificate) {
+		certPool.AddCert(cert)
+		if cert.VerifyHostname("selfsigned.ssh3") == nil {
+			tlsConf.ServerName = "selfsigned.ssh3"
+		}
+	}
+
+	// logCertificateMismatch emits the OpenSSH-style host key warning when a
+	// known host presents a certificate that matches none of the pinned ones.
+	logCertificateMismatch := func(received *x509.Certificate) {
+		log.Error().Msgf(
+			"WARNING: the certificate presented by %s does not match the one pinned in %s. "+
+				"If you did not change the server certificate, it could be a machine-in-the-middle attack. "+
+				"Pinned: %s. Received: SHA256:%s. "+
+				"If this change is legitimate, remove the host from %s or run again with -o StrictHostKeyChecking=no.",
+			hostKey, knownHostsPath,
+			strings.Join(knownHosts.Fingerprints(hostKey), ", "),
+			util.Sha256Fingerprint(received.Raw),
+			knownHostsPath)
+	}
+
 	log.Debug().Msgf("dialing QUIC host at %s", remoteAddr)
 	qClient, err := quic.DialEarly(ctx,
 		udpConn,
 		remoteAddr,
 		tlsConf,
 		&qconf)
-	if err != nil {
-		if transportErr, ok := err.(*quic.TransportError); ok {
-			if transportErr.ErrorCode.IsCryptoError() {
-				log.Debug().Msgf("received QUIC crypto error on first connection attempt: %s", err)
-				if tty == nil {
-					log.Error().Msgf("insecure server cert in non-terminal session, aborting")
-					return nil, -1
-				}
-				if _, ok := knownHosts[options.CanonicalHostFormat()]; ok {
-					log.Error().Msgf("The server certificate cannot be verified using the one installed in %s. "+
-						"If you did not change the server certificate, it could be a machine-in-the-middle attack. "+
-						"TLS error: %s", knownHostsPath, err)
-					log.Error().Msgf("Aborting.")
-					return nil, -1
-				}
-				// bad certificates, let's mimic the OpenSSH's behaviour similar to host keys
-				tlsConf.InsecureSkipVerify = true
-				var peerCertificate *x509.Certificate
-				certError := fmt.Errorf("we don't want to start a totally insecure connection")
-				tlsConf.VerifyConnection = func(ctx tls.ConnectionState) error {
-					peerCertificate = ctx.PeerCertificates[0]
-					return certError
-				}
-
-				_, err := quic.DialEarly(ctx,
-					udpConn,
-					remoteAddr,
-					tlsConf,
-					&qconf)
-				if !errors.Is(err, certError) {
-					log.Error().Msgf("could not create client QUIC connection: %s", err)
-					return nil, -1
-				}
-				// let's first check that the certificate is self-signed
-				if err := peerCertificate.CheckSignatureFrom(peerCertificate); err != nil {
-					log.Error().Msgf("the peer provided an unknown, insecure certificate, that is not self-signed: %s", err)
-					return nil, -1
-				}
-				// first, carriage return
-				_, _ = tty.WriteString("\r")
-				_, err = tty.WriteString("Received an unknown self-signed certificate from the server.\n\r" +
-					"We recommend not using self-signed certificates.\n\r" +
-					"This session is vulnerable a machine-in-the-middle attack.\n\r" +
-					"Certificate fingerprint: " +
-					"SHA256 " + util.Sha256Fingerprint(peerCertificate.Raw) + "\n\r" +
-					"Do you want to add this certificate to ~/.ssh3/known_hosts (yes/no)? ")
-				if err != nil {
-					log.Error().Msgf("cound not write on /dev/tty: %s", err)
-					return nil, -1
-				}
-
-				answer := ""
-				reader := bufio.NewReader(tty)
-				for {
-					answer, _ = reader.ReadString('\n')
-					answer = strings.TrimSpace(answer)
-					_, _ = tty.WriteString("\r") // always ensure a carriage return
-					if answer == "yes" || answer == "no" {
-						break
+	if err == nil {
+		// A successful handshake only proves that the chain is trusted (system
+		// CAs or a pinned certificate as anchor): compare the leaf against the
+		// pins ourselves so that a silently rotated certificate is detected.
+		if !skipHostVerification {
+			if peerCerts := qClient.ConnectionState().TLS.PeerCertificates; len(peerCerts) > 0 {
+				switch knownHosts.CheckCertificate(hostKey, peerCerts[0]) {
+				case ssh3.HostCertificateChanged:
+					if strictHostKeyChecking == ssh3.StrictHostKeyCheckingNo {
+						log.Warn().Msgf("StrictHostKeyChecking=no: the certificate of %s differs from the one pinned in %s (received: SHA256:%s), connecting anyway (insecure)",
+							hostKey, knownHostsPath, util.Sha256Fingerprint(peerCerts[0].Raw))
+					} else {
+						logCertificateMismatch(peerCerts[0])
+						qClient.CloseWithError(quic.ApplicationErrorCode(0), "server certificate does not match the pinned one")
+						return nil, -1
 					}
-					tty.WriteString("Invalid answer, answer \"yes\" or \"no\" ")
+				case ssh3.HostCertificateUnknown:
+					// first contact on a verifiable certificate: accept-new
+					// pins it, like OpenSSH records new host keys
+					if strictHostKeyChecking == ssh3.StrictHostKeyCheckingAcceptNew {
+						if err := ssh3.AppendKnownHost(knownHostsPath, hostKey, peerCerts[0]); err != nil {
+							log.Error().Msgf("could not append known host to %s: %s", knownHostsPath, err)
+							qClient.CloseWithError(quic.ApplicationErrorCode(0), "could not pin the server certificate")
+							return nil, -1
+						}
+						log.Info().Msgf("accept-new: pinned the first-use certificate of %s in %s", hostKey, knownHostsPath)
+					}
+				case ssh3.HostCertificateMatches:
+					// the pinned certificate is the one being used
 				}
-				if answer == "no" {
-					log.Info().Msg("Connection aborted")
-					return nil, 0
+			}
+		}
+		return qClient, 0
+	}
+
+	if transportErr, ok := err.(*quic.TransportError); ok {
+		if transportErr.ErrorCode.IsCryptoError() {
+			log.Debug().Msgf("received QUIC crypto error on first connection attempt: %s", err)
+			_, hostPinned := knownHosts[hostKey]
+
+			if hostPinned && strictHostKeyChecking != ssh3.StrictHostKeyCheckingNo {
+				// The pinned certificate(s) did not verify the server: the
+				// certificate changed, which can be a machine-in-the-middle attack.
+				// This covers yes and ask; accept-new also refuses changed pins.
+				log.Error().Msgf("the server certificate cannot be verified using the one pinned in %s (pinned: %s). "+
+					"If you did not change the server certificate, it could be a machine-in-the-middle attack. "+
+					"TLS error: %s", knownHostsPath, strings.Join(knownHosts.Fingerprints(hostKey), ", "), err)
+				log.Error().Msgf("Aborting.")
+				return nil, -1
+			}
+
+			// yes: never connect to a host whose certificate cannot be verified
+			if strictHostKeyChecking == ssh3.StrictHostKeyCheckingYes {
+				log.Error().Msgf("StrictHostKeyChecking=yes: the certificate of %s could not be verified and the host is not pinned in %s, refusing to connect. "+
+					"TLS error: %s", hostKey, knownHostsPath, err)
+				log.Error().Msgf("Aborting.")
+				return nil, -1
+			}
+
+			// ask keeps the historical non-interactive guard; accept-new and no
+			// decide without any user interaction
+			if tty == nil && strictHostKeyChecking == ssh3.StrictHostKeyCheckingAsk {
+				log.Error().Msgf("insecure server cert in non-terminal session, aborting")
+				return nil, -1
+			}
+
+			// capture the actual peer certificate: dial once more with the
+			// verification disabled and grab the certificate through the
+			// verify callback
+			captureConf := tlsConf.Clone()
+			captureConf.InsecureSkipVerify = true
+			var peerCertificate *x509.Certificate
+			certError := fmt.Errorf("we don't want to start a totally insecure connection")
+			captureConf.VerifyConnection = func(ctx tls.ConnectionState) error {
+				peerCertificate = ctx.PeerCertificates[0]
+				return certError
+			}
+
+			_, err := quic.DialEarly(ctx,
+				udpConn,
+				remoteAddr,
+				captureConf,
+				&qconf)
+			if !errors.Is(err, certError) {
+				log.Error().Msgf("could not create client QUIC connection: %s", err)
+				return nil, -1
+			}
+
+			// no: the explicitly allowed insecure behaviour
+			if strictHostKeyChecking == ssh3.StrictHostKeyCheckingNo {
+				if hostPinned {
+					log.Warn().Msgf("StrictHostKeyChecking=no: the certificate of %s differs from the one pinned in %s (pinned: %s, received: SHA256:%s), connecting anyway (insecure)",
+						hostKey, knownHostsPath, strings.Join(knownHosts.Fingerprints(hostKey), ", "),
+						util.Sha256Fingerprint(peerCertificate.Raw))
+				} else if peerCertificate.CheckSignatureFrom(peerCertificate) == nil {
+					// pin the self-signed first-use certificate so that later
+					// sessions can detect a certificate change
+					if err := ssh3.AppendKnownHost(knownHostsPath, hostKey, peerCertificate); err != nil {
+						log.Error().Msgf("could not append known host to %s: %s", knownHostsPath, err)
+						return nil, -1
+					}
+					log.Warn().Msgf("StrictHostKeyChecking=no: pinned the first-use certificate of %s in %s", hostKey, knownHostsPath)
 				}
-				if err := ssh3.AppendKnownHost(knownHostsPath, options.CanonicalHostFormat(), peerCertificate); err != nil {
+				captureConf.VerifyConnection = nil
+				qClient, err := quic.DialEarly(ctx, udpConn, remoteAddr, captureConf, &qconf)
+				if err != nil {
+					log.Error().Msgf("could not establish client QUIC connection: %s", err)
+					return nil, -1
+				}
+				return qClient, 0
+			}
+
+			// let's first check that the certificate is self-signed
+			// (ask and accept-new only ever pin self-signed certificates)
+			if err := peerCertificate.CheckSignatureFrom(peerCertificate); err != nil {
+				log.Error().Msgf("the peer provided an unknown, insecure certificate, that is not self-signed: %s", err)
+				return nil, -1
+			}
+
+			// accept-new: pin automatically, then reconnect with the pinned
+			// certificate actually verified
+			if strictHostKeyChecking == ssh3.StrictHostKeyCheckingAcceptNew {
+				if err := ssh3.AppendKnownHost(knownHostsPath, hostKey, peerCertificate); err != nil {
 					log.Error().Msgf("could not append known host to %s: %s", knownHostsPath, err)
 					return nil, -1
 				}
-				tty.WriteString(fmt.Sprintf("Successfully added the certificate to %s, please rerun the command\n\r", knownHostsPath))
+				trustCertificate(peerCertificate)
+				qClient, err := quic.DialEarly(ctx, udpConn, remoteAddr, tlsConf, &qconf)
+				if err != nil {
+					log.Error().Msgf("could not establish client QUIC connection: %s", err)
+					return nil, -1
+				}
+				log.Info().Msgf("accept-new: pinned the first-use certificate of %s in %s", hostKey, knownHostsPath)
+				return qClient, 0
+			}
+
+			// ask: historical interactive TOFU flow
+			// first, carriage return
+			_, _ = tty.WriteString("\r")
+			_, err = tty.WriteString("Received an unknown self-signed certificate from the server.\n\r" +
+				"We recommend not using self-signed certificates.\n\r" +
+				"This session is vulnerable a machine-in-the-middle attack.\n\r" +
+				"Certificate fingerprint: " +
+				"SHA256 " + util.Sha256Fingerprint(peerCertificate.Raw) + "\n\r" +
+				"Do you want to add this certificate to ~/.ssh3/known_hosts (yes/no)? ")
+			if err != nil {
+				log.Error().Msgf("cound not write on /dev/tty: %s", err)
+				return nil, -1
+			}
+
+			answer := ""
+			reader := bufio.NewReader(tty)
+			for {
+				answer, _ = reader.ReadString('\n')
+				answer = strings.TrimSpace(answer)
+				_, _ = tty.WriteString("\r") // always ensure a carriage return
+				if answer == "yes" || answer == "no" {
+					break
+				}
+				tty.WriteString("Invalid answer, answer \"yes\" or \"no\" ")
+			}
+			if answer == "no" {
+				log.Info().Msg("Connection aborted")
 				return nil, 0
 			}
+			if err := ssh3.AppendKnownHost(knownHostsPath, hostKey, peerCertificate); err != nil {
+				log.Error().Msgf("could not append known host to %s: %s", knownHostsPath, err)
+				return nil, -1
+			}
+			tty.WriteString(fmt.Sprintf("Successfully added the certificate to %s, please rerun the command\n\r", knownHostsPath))
+			return nil, 0
 		}
-		log.Error().Msgf("could not establish client QUIC connection: %s", err)
-		return nil, -1
 	}
-
-	return qClient, 0
+	log.Error().Msgf("could not establish client QUIC connection: %s", err)
+	return nil, -1
 }
 
 func parseAddrPort(addrPort string) (localPort int, remoteIP net.IP, remotePort int, err error) {
@@ -248,10 +371,16 @@ func parseAddrPort(addrPort string) (localPort int, remoteIP net.IP, remotePort 
 	return localPort, remoteIP, remotePort, err
 }
 
-func getConfigOptions(hostUrl *url.URL, sshConfig *ssh_config.Config, optionParsers map[client_config.OptionName]client_config.OptionParser) (*client_config.Config, error) {
+func getConfigOptions(hostUrl *url.URL, sshConfig *matchcfg.Resolver, optionParsers map[client_config.OptionName]client_config.OptionParser) (*client_config.Config, error) {
 	urlHostname, urlPort := hostUrl.Hostname(), hostUrl.Port()
+	// The user known before reading the config: it feeds the Match user
+	// criterion and the default username resolution below.
+	urlUser := hostUrl.User.Username()
+	if urlUser == "" {
+		urlUser = hostUrl.Query().Get("user")
+	}
 
-	configHostname, configPort, configUser, configUrlPath, configAuthMethods, pluginOptions, err := ssh3.GetConfigForHost(urlHostname, sshConfig, optionParsers)
+	configHostname, configPort, configUser, configUrlPath, configAuthMethods, pluginOptions, err := ssh3.GetConfigForHost(urlHostname, urlUser, sshConfig, optionParsers)
 	if err != nil {
 		log.Error().Msgf("Could not get config for %s: %s", urlHostname, err)
 		return nil, err
@@ -280,10 +409,7 @@ func getConfigOptions(hostUrl *url.URL, sshConfig *ssh_config.Config, optionPars
 		port = configPort
 	}
 
-	username := hostUrl.User.Username()
-	if username == "" {
-		username = hostUrl.Query().Get("user")
-	}
+	username := urlUser
 	if username == "" {
 		username = configUser
 	}
@@ -306,7 +432,7 @@ func getConfigOptions(hostUrl *url.URL, sshConfig *ssh_config.Config, optionPars
 	return client_config.NewConfig(username, hostname, port, urlPath, configAuthMethods, pluginOptions)
 }
 
-func getConnectionMaterialFromURL(hostUrl *url.URL, sshConfig *ssh_config.Config, cliAuthMethods []interface{}, cliOptions map[client_config.OptionName]client_config.Option, optionParsers map[client_config.OptionName]client_config.OptionParser) (agent.ExtendedAgent, *client_config.Config, error) {
+func getConnectionMaterialFromURL(hostUrl *url.URL, sshConfig *matchcfg.Resolver, cliAuthMethods []interface{}, cliOptions map[client_config.OptionName]client_config.Option, optionParsers map[client_config.OptionName]client_config.OptionParser) (agent.ExtendedAgent, *client_config.Config, error) {
 	configOptions, err := getConfigOptions(hostUrl, sshConfig, optionParsers)
 	if err != nil {
 		return nil, nil, fmt.Errorf("could not apply config to %s: %s", hostUrl, err)
@@ -339,6 +465,24 @@ func getConnectionMaterialFromURL(hostUrl *url.URL, sshConfig *ssh_config.Config
 		return nil, nil, fmt.Errorf("could not instantiate invalid options: %s", err)
 	}
 	return agentClient, options, nil
+}
+
+// cliOptionFlags gathers repeatable -o Key=Value options, mimicking OpenSSH.
+type cliOptionFlags []string
+
+func (o *cliOptionFlags) String() string {
+	if o == nil {
+		return ""
+	}
+	return strings.Join(*o, ",")
+}
+
+func (o *cliOptionFlags) Set(value string) error {
+	if _, _, found := strings.Cut(value, "="); !found {
+		return fmt.Errorf("option must be in the Key=Value form, got %q", value)
+	}
+	*o = append(*o, value)
+	return nil
 }
 
 type FlagValue struct {
@@ -394,6 +538,10 @@ func ClientMain() int {
 	keyLogFile := flag.String("keylog", "", "Write QUIC TLS keys and master secret in the specified keylog file: only for debugging purpose")
 	passwordAuthentication := flag.Bool("use-password", false, "if set, do classical password authentication")
 	insecure := flag.Bool("insecure", false, "if set, skip server certificate verification")
+	strictHostKeyCheckingFlag := flag.String("strict-host-key-checking", "",
+		"StrictHostKeyChecking policy: yes, accept-new, no or ask (default: ask; overrides -o and ~/.ssh/config)")
+	optionOverrides := cliOptionFlags{}
+	flag.Var(&optionOverrides, "o", "configuration option as Key=Value, e.g. -o StrictHostKeyChecking=accept-new (can be repeated)")
 	issuerUrl := flag.String("use-oidc", "", "if set, force the use of OpenID Connect with the specified issuer url as parameter (it opens a browser window)")
 	oidcConfigFileName := flag.String("oidc-config", "", "OpenID Connect json config file containing the \"client_id\" and \"client_secret\" fields needed for most identity providers")
 	verbose := flag.Bool("v", false, "if set, enable verbose mode")
@@ -499,6 +647,50 @@ func ClientMain() int {
 	// gather the parsed CLI options
 	for _, v := range flagValues {
 		cliOptions[v.pluginOptionName] = v.parsedOption
+	}
+
+	// detect whether -strict-host-key-checking was explicitly set on the
+	// command line: an explicit flag takes precedence over -o and ssh config
+	strictFlagSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "strict-host-key-checking" {
+			strictFlagSet = true
+		}
+	})
+
+	// apply the -o Key=Value overrides: StrictHostKeyChecking is handled
+	// natively, other keywords are routed to the registered option parsers
+	// (the auth plugins' config keywords, e.g. IdentityFile)
+	strictOptionValue := ""
+	parsersByKeyword := make(map[string]client_config.OptionName)
+	for optionName, parser := range cliParsers {
+		keyword := strings.ToLower(parser.OptionConfigName())
+		if _, dup := parsersByKeyword[keyword]; !dup {
+			parsersByKeyword[keyword] = optionName
+		}
+	}
+	for _, keyValuePair := range optionOverrides {
+		key, value, _ := strings.Cut(keyValuePair, "=")
+		key = strings.TrimSpace(key)
+		if strings.EqualFold(key, "StrictHostKeyChecking") {
+			if _, err := ssh3.ParseStrictHostKeyChecking(value); err != nil {
+				log.Error().Msgf("%s", err)
+				return -1
+			}
+			strictOptionValue = strings.TrimSpace(value)
+			continue
+		}
+		if optionName, ok := parsersByKeyword[strings.ToLower(key)]; ok {
+			option, err := cliParsers[optionName].Parse([]string{value})
+			if err != nil {
+				log.Error().Msgf("could not parse option %s: %s", key, err)
+				return -1
+			}
+			cliOptions[optionName] = option
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "Bad configuration option '%s'\n", key)
+		return -1
 	}
 
 	useOIDC := *issuerUrl != ""
@@ -650,12 +842,12 @@ func ClientMain() int {
 		}
 	}
 
-	var sshConfig *ssh_config.Config
+	var sshConfig *matchcfg.Resolver
 	var configBytes []byte
 	configPath := path.Join(homedir(), ".ssh", "config")
 	configBytes, err = os.ReadFile(configPath)
 	if err == nil {
-		sshConfig, err = ssh_config.DecodeBytes(configBytes)
+		sshConfig, err = matchcfg.New(configPath, configBytes)
 		if err != nil {
 			log.Warn().Msgf("could not parse %s: %s, ignoring config", configPath, err)
 			sshConfig = nil
@@ -781,6 +973,22 @@ func ClientMain() int {
 			}
 		}
 	}
+
+	// StrictHostKeyChecking resolution (OpenSSH parity): an explicit
+	// -strict-host-key-checking wins over -o StrictHostKeyChecking, which wins
+	// over the ~/.ssh/config keyword; the default "ask" keeps the historical
+	// interactive TOFU behaviour
+	var strictConfigValue string
+	if strictSshConfig, err := sshConfig.ConfigForHost(parsedUrl.Hostname(), options.Username()); err == nil && strictSshConfig != nil {
+		if v, err := strictSshConfig.Get(parsedUrl.Hostname(), "StrictHostKeyChecking"); err == nil {
+			strictConfigValue = v
+		}
+	}
+	strictHostKeyChecking, err := ssh3.ResolveStrictHostKeyChecking(strictFlagSet, *strictHostKeyCheckingFlag, strictOptionValue, strictConfigValue)
+	if err != nil {
+		log.Error().Msgf("could not resolve StrictHostKeyChecking: %s", err)
+		return -1
+	}
 	if (*controlMaster == "yes" || *controlMaster == "auto") && *proxyJump != "" {
 		log.Error().Msgf("-control-master is not compatible with -proxy-jump (from the command line or ~/.ssh/config)")
 		return -1
@@ -811,7 +1019,7 @@ func ClientMain() int {
 			// this process is the detached master: connect and serve the
 			// control socket; it never runs sessions itself
 			idleTimeout, _ := parseControlPersist(*controlPersist)
-			qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, options, nil, nil, tuning)
+			qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, strictHostKeyChecking, oidcConfig, options, nil, nil, tuning)
 			if qconn == nil {
 				return status
 			}
@@ -871,7 +1079,7 @@ func ClientMain() int {
 			log.Error().Msgf("Could not get connection material for proxy %s: %s", proxyParsedUrl, err)
 			return -1
 		}
-		qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, proxyOptions, nil, tty, tuning)
+		qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, strictHostKeyChecking, oidcConfig, proxyOptions, nil, tty, tuning)
 
 		if qconn == nil {
 			if status != 0 {
@@ -910,7 +1118,7 @@ func ClientMain() int {
 		log.Debug().Msgf("started proxy jump at %s", proxyAddress)
 	}
 
-	qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, oidcConfig, options, proxyAddress, tty, tuning)
+	qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, strictHostKeyChecking, oidcConfig, options, proxyAddress, tty, tuning)
 
 	if qconn == nil {
 		if status != 0 {

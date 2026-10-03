@@ -11,10 +11,10 @@ import (
 
 	"github.com/francoismichel/ssh3/auth/oidc"
 	client_config "github.com/francoismichel/ssh3/client/config"
+	matchcfg "github.com/francoismichel/ssh3/client/config/matchcfg"
 	"github.com/francoismichel/ssh3/util"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/kevinburke/ssh_config"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
@@ -254,28 +254,36 @@ func (i rawBearerTokenIdentity) String() string {
 	return "raw-bearer-identity"
 }
 
-func GetConfigForHost(host string, config *ssh_config.Config, pluginsOptionsParsers map[client_config.OptionName]client_config.OptionParser) (hostname string, port int, user string, urlPath string, authMethodsToTry []interface{}, pluginOptions map[client_config.OptionName]client_config.Option, err error) {
+func GetConfigForHost(host string, urlUser string, config *matchcfg.Resolver, pluginsOptionsParsers map[client_config.OptionName]client_config.OptionParser) (hostname string, port int, user string, urlPath string, authMethodsToTry []interface{}, pluginOptions map[client_config.OptionName]client_config.Option, err error) {
 	pluginOptions = make(map[client_config.OptionName]client_config.Option)
 	port = -1
 	if config == nil {
 		return
 	}
-	hostname, err = config.Get(host, "HostName")
+	resolved, err := config.ConfigForHost(host, urlUser)
+	if err != nil {
+		// Mirror the historical behavior for unparseable configs: warn and
+		// continue without any config file.
+		log.Warn().Msgf("could not resolve ssh config for %s: %s, ignoring config", host, err)
+		err = nil
+		return
+	}
+	hostname, err = resolved.Get(host, "HostName")
 	if err != nil {
 		log.Error().Msgf("Could not get HostName from config: %s", err)
 		return
 	}
-	portStr, err := config.Get(host, "Port")
+	portStr, err := resolved.Get(host, "Port")
 	if err != nil {
 		log.Error().Msgf("Could not get Port from config: %s", err)
 		return
 	}
-	user, err = config.Get(host, "User")
+	user, err = resolved.Get(host, "User")
 	if err != nil {
 		log.Error().Msgf("Could not get User from config: %s", err)
 		return
 	}
-	urlPath, err = config.Get(host, "URLPath")
+	urlPath, err = resolved.Get(host, "URLPath")
 	if err != nil {
 		log.Error().Msgf("Could not get URLPath from config: %s", err)
 		return
@@ -292,7 +300,7 @@ func GetConfigForHost(host string, config *ssh_config.Config, pluginsOptionsPars
 	if err == nil {
 		port = p
 	}
-	identityFiles, err := config.GetAll(host, "IdentityFile")
+	identityFiles, err := resolved.GetAll(host, "IdentityFile")
 	if err != nil {
 		log.Error().Msgf("Could not get IdentityFiles from config: %s", err)
 		return
@@ -305,7 +313,7 @@ func GetConfigForHost(host string, config *ssh_config.Config, pluginsOptionsPars
 	for optionName, optionParser := range pluginsOptionsParsers {
 		log.Debug().Msgf("search for option %s (%s) in config", optionName, optionParser.OptionConfigName())
 		var optionValues []string
-		optionValues, err = config.GetAll(host, optionParser.OptionConfigName())
+		optionValues, err = resolved.GetAll(host, optionParser.OptionConfigName())
 		if err != nil {
 			log.Error().Msgf("config.Get returned an error: %s", err)
 			return
