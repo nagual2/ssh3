@@ -118,7 +118,9 @@ func run() int {
 			return
 		}
 		conv, err := ssh3.NewServerConversation(
-			context.Background(),
+			// derive from the QUIC connection so the conversation dies with it
+			// (same rationale as server_auth.HandleAuths)
+			qconn.Context(),
 			streamer.HTTPStream(),
 			qconn,
 			qconn,

@@ -42,8 +42,9 @@ type PtySpec struct {
 // described by spec, in that order. It returns the opened channel (non-nil
 // even on a post-open error) and whether a pty was requested, for the
 // caller's local console handling. When ForwardAgent is set, incoming agent
-// channels are served in the background against ctx.
-func (c *Client) OpenSession(ctx context.Context, spec SessionSpec) (ssh3.Channel, bool, error) {
+// channels are served in the background; the same dispatch loop also serves
+// the reverse-forwarding channels when the client has -R forwards.
+func (c *Client) OpenSession(_ context.Context, spec SessionSpec) (ssh3.Channel, bool, error) {
 	channel, err := c.OpenChannel("session", 30000, 0)
 	if err != nil {
 		return nil, false, err
@@ -56,28 +57,13 @@ func (c *Client) OpenSession(ctx context.Context, spec SessionSpec) (ssh3.Channe
 			log.Error().Msgf("could not forward agent: %s", err.Error())
 			return channel, false, err
 		}
-		go func() {
-			for {
-				forwardChannel, err := c.AcceptChannel(ctx)
-				if err != nil {
-					if err != context.Canceled {
-						log.Error().Msgf("could not accept forwarding channel: %s", err.Error())
-					}
-					return
-				} else if forwardChannel.ChannelType() != "agent-connection" {
-					log.Error().Msgf("unexpected server-initiated channel: %s", channel.ChannelType())
-					return
-				}
-				log.Debug().Msg("new agent connection, forwarding")
-				go func() {
-					err = forwardAgent(ctx, forwardChannel)
-					if err != nil {
-						log.Error().Msgf("agent forwarding error: %s", err.Error())
-						c.Close()
-					}
-				}()
-			}
-		}()
+		c.forwardAgent.Store(true)
+	}
+	if spec.ForwardAgent || len(c.reverseForwards) > 0 {
+		// one unified dispatch loop serves every server-initiated channel
+		// (agent connections and reverse-forwarding channels alike); started
+		// at most once per conversation
+		c.startAcceptLoop()
 	}
 
 	ptyRequested := false

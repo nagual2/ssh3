@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -231,6 +233,21 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 type Client struct {
 	qconn *quic.Conn
 	*ssh3.Conversation
+
+	// reverse forwarding (-R) state; see reverse_forward.go
+	reverseForwards []ReverseForward
+	forwardAgent    atomic.Bool
+	acceptOnce      sync.Once
+}
+
+// Close tears the conversation AND the underlying QUIC connection down.
+// Conversation.Close() alone only closes the control stream: without a QUIC
+// close frame the server may learn about the client's death very late (no
+// idle timeout is configured), which would keep the -R binds held long after
+// the client is gone. Shadows the embedded Conversation.Close.
+func (c *Client) Close() {
+	c.Conversation.Close()
+	c.qconn.CloseWithError(quic.ApplicationErrorCode(0), "closed by the client")
 }
 
 // DialOption customizes a client.Dial call.

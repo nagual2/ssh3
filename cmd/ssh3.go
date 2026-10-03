@@ -63,6 +63,10 @@ type quicTuning struct {
 	// KeepAlivePeriod overrides the default QUIC keepalive (1s);
 	// populated from ~/.ssh/config ServerAliveInterval
 	KeepAlivePeriod time.Duration
+	// MaxIncomingStreams overrides the default limit (10) on the concurrent
+	// streams the peer may open; reverse forwarding (-R) raises it to leave
+	// headroom for the server-initiated forwarded channels
+	MaxIncomingStreams int64
 }
 
 func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog io.Writer, ssh3Dir string, certPool *x509.CertPool, knownHostsPath string, knownHosts ssh3.KnownHosts,
@@ -114,6 +118,9 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 	var qconf quic.Config
 
 	qconf.MaxIncomingStreams = 10
+	if tuning.MaxIncomingStreams > 0 {
+		qconf.MaxIncomingStreams = tuning.MaxIncomingStreams
+	}
 	qconf.Allow0RTT = true
 	qconf.EnableDatagrams = true
 	qconf.KeepAlivePeriod = time.Second
@@ -557,6 +564,8 @@ func ClientMain() int {
 	forwardSSHAgent := flag.Bool("forward-agent", false, "if set, forwards ssh agent to be used with sshv2 connections on the remote host")
 	forwardUDP := flag.String("forward-udp", "", "if set, take a localport/remoteip@remoteport forwarding localhost@localport towards remoteip@remoteport")
 	forwardTCP := flag.String("forward-tcp", "", "if set, take a localport/remoteip@remoteport forwarding localhost@localport towards remoteip@remoteport")
+	var reverseForwardsFlag reverseForwardFlags
+	flag.Var(&reverseForwardsFlag, "R", "reverse forwarding: [bind_address:]bind_port[/udp]:target_host:target_port, the server binds the port and forwards to the local target (can be repeated)")
 	proxyJump := flag.String("proxy-jump", "", "if set, performs a proxy jump using the specified remote host as proxy (requires server with version >= 0.1.5)")
 	fileTransfer := flag.Bool("f", false, "file transfer mode: ssh3 -f SRC DST, with exactly one operand in the user@host:remote_path form (uploads towards it) and the other one local (downloads from it)")
 	transferPort := flag.Int("P", 443, "file transfer mode: server port for the user@host:remote_path operand")
@@ -581,6 +590,16 @@ func ClientMain() int {
 
 	flag.Parse()
 	args := flag.Args()
+
+	if len(reverseForwardsFlag) > 0 && (*controlOp != "" || *controlMaster != "no") {
+		log.Error().Msgf("-R is not compatible with -control-master")
+		return -1
+	}
+
+	if len(reverseForwardsFlag) > 0 && *fileTransfer {
+		fmt.Fprintln(os.Stderr, "-R cannot be combined with -f")
+		return -1
+	}
 
 	if *controlMaster != "no" && *proxyJump != "" {
 		log.Error().Msgf("-control-master is not compatible with -proxy-jump")
@@ -636,6 +655,12 @@ func ClientMain() int {
 		InitialPacketSize: uint16(*packetSize),
 		StreamRxWindowMiB: *streamRxMiB,
 		ConnRxWindowMiB:   *connRxMiB,
+	}
+	if len(reverseForwardsFlag) > 0 {
+		// the server opens one forwarded channel per accepted -R connection
+		// or UDP peer; the client's default incoming-stream limit (10) would
+		// throttle them well below the server-side cap
+		tuning.MaxIncomingStreams = 128
 	}
 
 	if *displayVersion {
@@ -1137,6 +1162,18 @@ func ClientMain() int {
 		log.Error().Msgf("could not dial %s: %s", options.CanonicalHostFormat(), err)
 		return -1
 	}
+	if len(reverseForwardsFlag) > 0 {
+		if err := c.SetReverseForwards(reverseForwardsFlag); err != nil {
+			log.Error().Msgf("could not set up reverse forwarding: %s", err)
+			return -1
+		}
+		for _, forward := range reverseForwardsFlag {
+			if err := c.RequestReverseForward(forward); err != nil {
+				log.Error().Msgf("reverse forwarding request for -R %s failed: %s", forward.SpecString(), err)
+				return -1
+			}
+		}
+	}
 	if localTCPAddr != nil && remoteTCPAddr != nil {
 		_, err := c.ForwardTCP(ctx, localTCPAddr, remoteTCPAddr)
 		if err != nil {
@@ -1158,6 +1195,10 @@ func ClientMain() int {
 
 	if *noSession {
 		log.Info().Msgf("-N: holding the connection open for the forwards until interrupted")
+		if len(reverseForwardsFlag) > 0 {
+			// no session channel to start the dispatch loop implicitly
+			c.StartAcceptLoop()
+		}
 		sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		<-sigCtx.Done()

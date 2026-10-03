@@ -306,6 +306,29 @@ func (c *Conversation) handleIncomingChannelStream(stream *quic.Stream) {
 
 	newChannel := NewChannel(channelInfo.ConversationStreamID, channelInfo.ConversationID, uint64(stream.StreamID()), channelInfo.ChannelType, channelInfo.MaxPacketSize, stream, stream, nil, c.channelsManager, false, false, true, c.defaultDatagramsQueueSize, nil)
 	newChannel.setDatagramSender(c.getDatagramSenderForChannel(newChannel.ChannelID()))
+	switch channelType {
+	case "forwarded-tcp":
+		// reverse port forwarding (-R): the additional header bytes carry the
+		// client-side target the channel must be bridged to
+		targetAddr, err := parseTCPForwardingHeader(channelInfo.ChannelID, &StreamByteReader{stream})
+		if err != nil {
+			log.Error().Msgf("could not parse forwarded-tcp header on channel %d: %s", channelInfo.ChannelID, err)
+			stream.CancelRead(quic.StreamErrorCode(0))
+			stream.CancelWrite(quic.StreamErrorCode(0))
+			return
+		}
+		newChannel = &TCPForwardingChannelImpl{Channel: newChannel, RemoteAddr: targetAddr}
+	case "forwarded-udp":
+		// same as forwarded-tcp, but datagram-based
+		targetAddr, err := parseUDPForwardingHeader(channelInfo.ChannelID, &StreamByteReader{stream})
+		if err != nil {
+			log.Error().Msgf("could not parse forwarded-udp header on channel %d: %s", channelInfo.ChannelID, err)
+			stream.CancelRead(quic.StreamErrorCode(0))
+			stream.CancelWrite(quic.StreamErrorCode(0))
+			return
+		}
+		newChannel = &UDPForwardingChannelImpl{Channel: newChannel, RemoteAddr: targetAddr}
+	}
 	c.channelsAcceptQueue.Add(newChannel)
 }
 
@@ -399,6 +422,41 @@ func (c *Conversation) OpenTCPForwardingChannel(maxPacketSize uint64, datagramsQ
 	channel.maybeSendHeader()
 	c.channelsManager.addChannel(channel)
 	return &TCPForwardingChannelImpl{Channel: channel, RemoteAddr: remoteAddr}, nil
+}
+
+// openForwardedChannel opens a server-initiated forwarded-* channel whose
+// additional header bytes carry targetIP:targetPort, the client-side endpoint
+// the channel must be bridged to. Used by the server to implement reverse
+// port forwarding (-R): each connection or datagram accepted on a bound
+// listener becomes one such channel towards the client.
+func (c *Conversation) openForwardedChannel(channelType string, maxPacketSize uint64, datagramsQueueSize uint64, targetIP net.IP, targetPort uint16) (Channel, error) {
+	str, err := c.streamCreator.OpenStream()
+	if err != nil {
+		return nil, err
+	}
+	additionalBytes := buildForwardingChannelAdditionalBytes(targetIP, targetPort)
+
+	channel := NewChannel(uint64(c.controlStream.StreamID()), c.conversationID, uint64(str.StreamID()), channelType, maxPacketSize, str, str, nil, c.channelsManager, true, true, false, datagramsQueueSize, additionalBytes)
+	channel.maybeSendHeader()
+	c.channelsManager.addChannel(channel)
+	return channel, nil
+}
+
+// OpenForwardedTCPChannel opens a "forwarded-tcp" channel towards the client,
+// which must bridge it to targetAddr (the local -R target). Server-side only.
+func (c *Conversation) OpenForwardedTCPChannel(maxPacketSize uint64, datagramsQueueSize uint64, targetAddr *net.TCPAddr) (Channel, error) {
+	return c.openForwardedChannel("forwarded-tcp", maxPacketSize, datagramsQueueSize, targetAddr.IP, uint16(targetAddr.Port))
+}
+
+// OpenForwardedUDPChannel opens a "forwarded-udp" channel towards the client,
+// which must bridge it to targetAddr (the local -R target). Server-side only.
+func (c *Conversation) OpenForwardedUDPChannel(maxPacketSize uint64, datagramsQueueSize uint64, targetAddr *net.UDPAddr) (Channel, error) {
+	channel, err := c.openForwardedChannel("forwarded-udp", maxPacketSize, datagramsQueueSize, targetAddr.IP, uint16(targetAddr.Port))
+	if err != nil {
+		return nil, err
+	}
+	channel.setDatagramSender(c.getDatagramSenderForChannel(channel.ChannelID()))
+	return &UDPForwardingChannelImpl{Channel: channel, RemoteAddr: targetAddr}, nil
 }
 
 func (c *Conversation) AcceptChannel(ctx context.Context) (Channel, error) {

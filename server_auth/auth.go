@@ -53,7 +53,12 @@ func HandleAuths(ctx context.Context, enablePasswordLogin bool, defaultMaxPacket
 			return
 		}
 		str := w.(http3.HTTPStreamer).HTTPStream()
-		conv, err := ssh3.NewServerConversation(ctx, str, qconn, qconn, defaultMaxPacketSize, peerVersion)
+		// The conversation context must derive from the QUIC connection's:
+		// when the connection dies without an application-level close (client
+		// crash, network loss), the conversation handler blocked in
+		// AcceptChannel has to wake up and release the conversation's external
+		// resources (reverse-forwarding binds, forwarded agent sockets).
+		conv, err := ssh3.NewServerConversation(qconn.Context(), str, qconn, qconn, defaultMaxPacketSize, peerVersion)
 		if err != nil {
 			log.Error().Msgf("could not create new server conversation")
 			w.WriteHeader(http.StatusInternalServerError)

@@ -77,6 +77,32 @@ func TestDumpWireVectors(t *testing.T) {
 		WantReply:      false,
 		ChannelRequest: &message.ExecRequest{Command: "uptime"},
 	}))
+
+	// Reverse forwarding (-R) payloads, carried as channel data on a
+	// "reverse-forward" control channel.
+	dump("channel_header_forwarded_tcp", buildHeader(
+		4, "forwarded-tcp", 30000,
+		buildForwardingChannelAdditionalBytes(net.ParseIP("127.0.0.1").To4(), 8080),
+	))
+	dump("reverse_forward_request_tcp", writeMessage(t, &message.RequestReverseForward{
+		Protocol:      util.SSHForwardingProtocolTCP,
+		BindAddress:   "127.0.0.1",
+		BindPort:      8080,
+		TargetAddress: "192.0.2.10",
+		TargetPort:    80,
+	}))
+	dump("reverse_forward_request_udp_wildcard", writeMessage(t, &message.RequestReverseForward{
+		Protocol:      util.SSHProtocolUDP,
+		BindAddress:   "*",
+		BindPort:      53,
+		TargetAddress: "2001:db8::1",
+		TargetPort:    53,
+	}))
+	dump("reverse_forward_reply_ok", writeMessage(t, &message.ReverseForwardReply{BoundPort: 8080}))
+	dump("reverse_forward_reply_error", writeMessage(t, &message.ReverseForwardReply{
+		BoundPort: 0,
+		ErrorUTF8: "bind: address already in use",
+	}))
 }
 
 func strings140() string {

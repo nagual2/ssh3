@@ -1073,6 +1073,14 @@ func ServerMain() int {
 					go serveSFTPSubsystem(authenticatedUser, channel)
 					continue
 				}
+				if channel.ChannelType() == ssh3Messages.ChannelTypeReverseForward {
+					log.Debug().Msgf("accepted reverse-forward control channel %d", channel.ChannelID())
+					// own goroutine, own lifetime: serving the -R bind request
+					// and its listener must not end the conversation the way a
+					// session does
+					go handleReverseForwardChannel(conv, channel)
+					continue
+				}
 				log.Debug().Msgf("accepted session channel %d of type %q", channel.ChannelID(), channel.ChannelType())
 				runningSessions.Insert(channel, &runningSession{
 					channelState:   LARVAL,
