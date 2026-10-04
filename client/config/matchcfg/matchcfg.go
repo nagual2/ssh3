@@ -29,13 +29,21 @@
 //
 // exec runs the command with "sh -c" (unix) or "cmd /c" (windows) and matches
 // on exit status 0; OpenSSH uses the user's login shell instead.
+//
+// Include is handled here too: the content of an included file is spliced into
+// the configuration at the place of the directive before anything else is
+// parsed, exactly like OpenSSH. This is what makes Host and Match blocks of an
+// included file participate in the alias and Match filtering instead of being
+// handled (or rejected) by the ssh_config parser.
 package matchcfg
 
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
 	osuser "os/user"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -87,6 +95,30 @@ type section struct {
 	body        []string              // verbatim body lines
 }
 
+// configLine is one physical line of the configuration together with the file
+// it comes from, so that parse errors keep pointing at the file that really
+// holds the offending line once Include has spliced files together.
+type configLine struct {
+	text string
+	file string
+	num  int // 1-based line number inside file
+}
+
+// pos renders the origin of the line the way an editor expects it, so that a
+// parse error points at the included file rather than at the main config.
+func (l configLine) pos() string {
+	if l.file == "" {
+		return fmt.Sprintf("line %d", l.num)
+	}
+	return fmt.Sprintf("%s:%d", l.file, l.num)
+}
+
+// maxIncludeDepth bounds the recursion of Include directives. OpenSSH refuses
+// to parse more than five nested levels; ssh3 uses a larger bound and stops
+// expanding at the limit instead of failing, so that a pathological
+// configuration can never block a connection.
+const maxIncludeDepth = 16
+
 // Resolver resolves one SSH config file (typically ~/.ssh/config) for a given
 // host alias, with support for Match blocks. After a successful New, a
 // Resolver is read-only and safe for concurrent use.
@@ -102,7 +134,8 @@ type Resolver struct {
 // New builds a Resolver from the raw content of a user SSH config file. The
 // file structure and every Match criterion are parsed eagerly, so syntax
 // errors (including invalid Match criteria) are reported before any
-// connection is attempted.
+// connection is attempted. Include directives are expanded first, so their
+// errors point at the included file.
 func New(userConfigPath string, userConfigBytes []byte) (*Resolver, error) {
 	r := &Resolver{
 		userConfigPath:  userConfigPath,
@@ -112,9 +145,16 @@ func New(userConfigPath string, userConfigBytes []byte) (*Resolver, error) {
 	if u, err := osuser.Current(); err == nil {
 		r.localUser = u.Username
 	}
-	sections, hasMatch, err := parseSections(string(userConfigBytes))
+	lines, expanded, err := expandIncludes(userConfigPath, userConfigBytes)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %v", userConfigPath, err)
+		return nil, err
+	}
+	if expanded {
+		r.userConfigBytes = joinLines(lines)
+	}
+	sections, hasMatch, err := parseSections(lines)
+	if err != nil {
+		return nil, err
 	}
 	r.sections = sections
 	r.hasMatch = hasMatch
@@ -254,23 +294,23 @@ func (r *Resolver) matchSection(sec *section, alias, effectiveHost, effectiveUse
 // parseSections splits a config text into sections. Only Match criteria are
 // validated here; everything else is kept verbatim for the ssh_config parser,
 // which stays the single source of truth for directive syntax.
-func parseSections(text string) (sections []section, hasMatch bool, err error) {
-	lines := strings.Split(text, "\n")
+func parseSections(lines []configLine) (sections []section, hasMatch bool, err error) {
 	var ptrs []*section
 	var cur *section
-	for i, raw := range lines {
+	for i := range lines {
+		raw := lines[i].text
 		trimmed := strings.TrimLeft(raw, " \t")
 		keyword, rest := splitKey(trimmed)
 		switch strings.ToLower(keyword) {
 		case "host":
-			sec := &section{kind: sectionHost, line: i + 1, header: raw}
-			sec.patterns, sec.patternsErr = parseHostPatterns(rest, i+1)
+			sec := &section{kind: sectionHost, line: lines[i].num, header: raw}
+			sec.patterns, sec.patternsErr = parseHostPatterns(rest, lines[i])
 			ptrs = append(ptrs, sec)
 			cur = sec
 			continue
 		case "match":
-			sec := &section{kind: sectionMatch, line: i + 1}
-			sec.criteria, err = parseMatchCriteria(rest, i+1)
+			sec := &section{kind: sectionMatch, line: lines[i].num}
+			sec.criteria, err = parseMatchCriteria(rest, lines[i])
 			if err != nil {
 				return nil, false, err
 			}
@@ -292,6 +332,164 @@ func parseSections(text string) (sections []section, hasMatch bool, err error) {
 		sections[i] = *p
 	}
 	return sections, hasMatch, nil
+}
+
+// expandIncludes returns the lines of the configuration with every Include
+// directive replaced by the lines of the files it matches, exactly like
+// OpenSSH: the content of an included file takes the place of the directive
+// and therefore continues the Host or Match block that surrounds it. expanded
+// reports whether at least one Include directive was expanded.
+func expandIncludes(path string, content []byte) (lines []configLine, expanded bool, err error) {
+	return expandIncludeLines(newLines(path, content), 0, make(map[string]bool))
+}
+
+// newLines splits raw file content into located configuration lines.
+func newLines(path string, content []byte) []configLine {
+	raw := strings.Split(string(content), "\n")
+	lines := make([]configLine, len(raw))
+	for i, text := range raw {
+		lines[i] = configLine{text: text, file: path, num: i + 1}
+	}
+	return lines
+}
+
+// joinLines renders located lines back into a config text.
+func joinLines(lines []configLine) []byte {
+	var buf bytes.Buffer
+	for i := range lines {
+		buf.WriteString(lines[i].text)
+		buf.WriteByte('\n')
+	}
+	return buf.Bytes()
+}
+
+// expandIncludeLines recursively expands the Include directives of lines.
+// stack holds the canonical paths of the files currently being expanded and is
+// the loop guard for cyclic includes.
+func expandIncludeLines(lines []configLine, depth int, stack map[string]bool) ([]configLine, bool, error) {
+	out := make([]configLine, 0, len(lines))
+	expanded := false
+	for i := range lines {
+		targets, ok := includeTargets(lines[i])
+		if !ok {
+			out = append(out, lines[i])
+			continue
+		}
+		expanded = true
+		if depth >= maxIncludeDepth {
+			continue
+		}
+		included, err := expandIncludeTargets(targets, lines[i], depth, stack)
+		if err != nil {
+			return nil, false, err
+		}
+		out = append(out, included...)
+	}
+	return out, expanded, nil
+}
+
+// includeTargets reports whether line is an Include directive and returns the
+// file patterns it lists. An Include without arguments yields no target, which
+// ssh(1) also ignores.
+func includeTargets(line configLine) (targets []string, ok bool) {
+	keyword, rest := splitKey(strings.TrimLeft(line.text, " \t"))
+	if !strings.EqualFold(keyword, "include") {
+		return nil, false
+	}
+	return strings.Fields(normalizeValue(rest)), true
+}
+
+// expandIncludeTargets expands one Include directive: every listed pattern is
+// globbed, the matched files are read and expanded recursively in glob order,
+// and each file contributes at most once per directive.
+func expandIncludeTargets(targets []string, directive configLine, depth int, stack map[string]bool) ([]configLine, error) {
+	var out []configLine
+	seen := make(map[string]bool, len(targets))
+	for _, target := range targets {
+		matches, err := globInclude(target, directive.file)
+		if err != nil {
+			return nil, fmt.Errorf("%s: Include %s: %v", directive.pos(), target, err)
+		}
+		for _, match := range matches {
+			key, err := filepath.Abs(match)
+			if err != nil {
+				key = match
+			}
+			if seen[key] || stack[key] {
+				// Already pulled in by this directive, or a cyclic include:
+				// OpenSSH aborts on the latter, ssh3 stops expanding.
+				continue
+			}
+			seen[key] = true
+			content, err := os.ReadFile(match)
+			if err != nil {
+				// An unreadable include must not invalidate the rest of the
+				// configuration; OpenSSH only warns about it.
+				continue
+			}
+			stack[key] = true
+			expanded, _, err := expandIncludeLines(newLines(match, content), depth+1, stack)
+			delete(stack, key)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, expanded...)
+		}
+	}
+	return out, nil
+}
+
+// globInclude expands one Include target into the files it matches. An
+// absolute path (or a "~"-prefixed one) is used as is; a relative path is
+// first resolved against the directory of the including file and then against
+// ~/.ssh, which is where OpenSSH anchors relative Include paths. A pattern
+// matching nothing is not an error, exactly as with ssh(1).
+func globInclude(target, includingFile string) ([]string, error) {
+	resolved := target
+	if home := userHomeDir(); home != "" && (target == "~" || strings.HasPrefix(target, "~/") || strings.HasPrefix(target, `~\`)) {
+		resolved = filepath.Join(home, strings.TrimLeft(target[1:], `/\`))
+	}
+	if !filepath.IsAbs(resolved) {
+		candidates := []string{filepath.Join(filepath.Dir(includingFile), resolved)}
+		if sshDir := userSSHDir(); sshDir != "" {
+			candidates = append(candidates, filepath.Join(sshDir, resolved))
+		}
+		for _, candidate := range candidates {
+			matches, err := filepath.Glob(candidate)
+			if err != nil {
+				return nil, err
+			}
+			if len(matches) > 0 {
+				return matches, nil
+			}
+		}
+		return nil, nil
+	}
+	return filepath.Glob(resolved)
+}
+
+// userSSHDir returns the ~/.ssh directory, where OpenSSH anchors relative
+// Include paths. It returns "" when the home directory is unknown.
+func userSSHDir() string {
+	if home := userHomeDir(); home != "" {
+		return filepath.Join(home, ".ssh")
+	}
+	return ""
+}
+
+// userHomeDir returns the home directory of the current user, preferring the
+// one reported by os/user and falling back to the environment (the os/user
+// lookup can fail in statically linked or cross-compiled builds).
+func userHomeDir() string {
+	if u, err := osuser.Current(); err == nil && u.HomeDir != "" {
+		return u.HomeDir
+	}
+	for _, key := range []string{"HOME", "USERPROFILE"} {
+		if v := os.Getenv(key); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // splitKey splits the first whitespace- or '='-delimited token from line and
@@ -320,13 +518,13 @@ func normalizeValue(rest string) string {
 
 // parseHostPatterns extracts the patterns of a Host line, using the same
 // syntax as the ssh_config parser (glob wildcards, '!' negation).
-func parseHostPatterns(rest string, line int) ([]*ssh_config.Pattern, error) {
+func parseHostPatterns(rest string, line configLine) ([]*ssh_config.Pattern, error) {
 	strs := strings.Fields(normalizeValue(rest))
 	patterns := make([]*ssh_config.Pattern, 0, len(strs))
 	for _, s := range strs {
 		p, err := ssh_config.NewPattern(s)
 		if err != nil {
-			return nil, fmt.Errorf("line %d: invalid host pattern %q: %v", line, s, err)
+			return nil, fmt.Errorf("%s: invalid host pattern %q: %v", line.pos(), s, err)
 		}
 		patterns = append(patterns, p)
 	}
@@ -337,10 +535,10 @@ func parseHostPatterns(rest string, line int) ([]*ssh_config.Pattern, error) {
 // criteria are rejected so that a typo never silently changes which blocks
 // apply. Like OpenSSH, an attribute may be negated with a leading '!' and a
 // value criterion accepts an "attr=value" form.
-func parseMatchCriteria(rest string, line int) ([]criterion, error) {
+func parseMatchCriteria(rest string, line configLine) ([]criterion, error) {
 	args, err := splitMatchArgs(normalizeValue(rest))
 	if err != nil {
-		return nil, fmt.Errorf("line %d: %v", line, err)
+		return nil, fmt.Errorf("%s: %v", line.pos(), err)
 	}
 	var criteria []criterion
 	for i := 0; i < len(args); i++ {
@@ -369,13 +567,13 @@ func parseMatchCriteria(rest string, line int) ([]criterion, error) {
 				i++
 				return args[i], nil
 			default:
-				return "", fmt.Errorf("line %d: Match criterion %q requires a value", line, attr)
+				return "", fmt.Errorf("%s: Match criterion %q requires a value", line.pos(), attr)
 			}
 		}
 		switch attr {
 		case "all", "final", "canonical":
 			if hasInlineValue {
-				return nil, fmt.Errorf("line %d: unsupported Match criterion %q", line, args[i])
+				return nil, fmt.Errorf("%s: unsupported Match criterion %q", line.pos(), args[i])
 			}
 			kind := criterionAll
 			switch attr {
@@ -392,7 +590,7 @@ func parseMatchCriteria(rest string, line int) ([]criterion, error) {
 			}
 			patterns, err := parsePatternList(arg)
 			if err != nil {
-				return nil, fmt.Errorf("line %d: Match %s: %v", line, attr, err)
+				return nil, fmt.Errorf("%s: Match %s: %v", line.pos(), attr, err)
 			}
 			kind := criterionHost
 			switch attr {
@@ -411,15 +609,15 @@ func parseMatchCriteria(rest string, line int) ([]criterion, error) {
 			}
 			criteria = append(criteria, criterion{kind: criterionExec, negate: negate, command: arg})
 		default:
-			return nil, fmt.Errorf("line %d: unsupported Match criterion %q", line, args[i])
+			return nil, fmt.Errorf("%s: unsupported Match criterion %q", line.pos(), args[i])
 		}
 	}
 	if len(criteria) == 0 {
-		return nil, fmt.Errorf("line %d: Match directive without criteria", line)
+		return nil, fmt.Errorf("%s: Match directive without criteria", line.pos())
 	}
 	for i := range criteria {
 		if criteria[i].kind == criterionAll && len(criteria) > 1 {
-			return nil, fmt.Errorf("line %d: Match \"all\" cannot be combined with other Match attributes", line)
+			return nil, fmt.Errorf("%s: Match \"all\" cannot be combined with other Match attributes", line.pos())
 		}
 	}
 	return criteria, nil
