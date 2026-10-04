@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"net"
 	"testing"
+	"time"
 )
 
 // The SOCKS5 request must be decoded for the three address types a client can
@@ -126,6 +127,48 @@ func TestParseSocks5Request(t *testing.T) {
 			if request.Version != socks5Version || request.Command != socks5CommandConnect {
 				t.Errorf("version/command = %d/%d, want %d/%d",
 					request.Version, request.Command, socks5Version, socks5CommandConnect)
+			}
+		})
+	}
+}
+
+// The reader must consume exactly the bytes a real client sends. The request
+// length for the fixed-size address forms must not include the domain form's
+// length byte: an IPv4 request is 10 bytes and an IPv6 request 22, and a
+// reader waiting for one byte more than that stalls a live client until the
+// handshake deadline kills the connection.
+func TestReadSocks5RequestAddressLengths(t *testing.T) {
+	ipv6 := net.ParseIP("2001:db8::1").To16()
+	if ipv6 == nil {
+		t.Fatal("could not build the test IPv6 address")
+	}
+	requests := map[string][]byte{
+		"ipv4":   {socks5Version, socks5CommandConnect, 0x00, socks5AddressIPv4, 127, 0, 0, 1, 0x1f, 0x90},
+		"ipv6":   append([]byte{socks5Version, socks5CommandConnect, 0x00, socks5AddressIPv6}, append(ipv6, 0x1f, 0x90)...),
+		"domain": append([]byte{socks5Version, socks5CommandConnect, 0x00, socks5AddressDomain, 4}, append([]byte("echo"), 0x00, 0x50)...),
+	}
+	for name, request := range requests {
+		t.Run(name, func(t *testing.T) {
+			client, server := net.Pipe()
+			defer client.Close()
+			defer server.Close()
+			if err := server.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				t.Fatalf("could not set the read deadline: %s", err)
+			}
+			go func() {
+				client.Write(request)
+				// keep the write side open long enough for a wrong, longer
+				// read to hit the deadline instead of EOF
+				time.Sleep(3 * time.Second)
+				client.Close()
+			}()
+			buffer := make([]byte, socks5MaxRequestLength)
+			length, err := readSocks5Request(server, buffer)
+			if err != nil {
+				t.Fatalf("readSocks5Request(%s) failed: %s", name, err)
+			}
+			if length != len(request) {
+				t.Errorf("readSocks5Request(%s) consumed %d bytes, want %d", name, length, len(request))
 			}
 		})
 	}

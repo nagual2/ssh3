@@ -4,6 +4,12 @@ All notable changes to the **nagual2 fork** of SSH3, starting from the first for
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); each section maps to a release tag, newest first.
 
+## [0.1.25] - 2026-10-04
+
+### Fixed
+- **Dynamic SOCKS forwarding (`-D`) could not connect at all** (`cmd/dynamic_forward.go`): the SOCKS5 request reader computed one byte too many for every address form. The `+1` that is only correct for the domain form's length byte was applied to IPv4 and IPv6 as well (IPv4 computed as 11 bytes instead of 10, IPv6 as 23 instead of 22), and after reading the domain length byte the final read started over at that byte, re-reading it. A real client's request was therefore never complete: the reader stalled until the 30-second handshake deadline killed the connection, so every `CONNECT` through the proxy timed out. The exact request size is now computed per address form, and the domain payload is read past the already-consumed length byte. Caught by a live loopback smoke test, not by the unit suite: the reader had no test at all, and a regression test now drives real request bytes for all three address forms through `net.Pipe`.
+- **`-D` allocated a huge datagram queue per connection** (`cmd/dynamic_forward.go`): the data channel was opened with the 10 MiB channel window constant passed as the *datagrams queue size*, which allocates a channel entry per queue slot (tens of megabytes per SOCKS connection) although the tunnel never carries datagrams. The queue size is now 0, as for the session and reverse-forward channels.
+
 ## [0.1.24] - 2026-10-04
 
 ### Added

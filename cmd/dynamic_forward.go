@@ -63,9 +63,6 @@ const (
 	// socks5HandshakeTimeout bounds the client prologue. A client that opens
 	// a connection and then says nothing must not hold a channel open.
 	socks5HandshakeTimeout = 30 * time.Second
-	// socks5ChannelWindow is the per-channel flow control window requested for
-	// the data channels, in bytes.
-	socks5ChannelWindow = 10 * 1024 * 1024
 )
 
 // socks5Error carries the SOCKS5 reply code that best describes a failure, so
@@ -178,16 +175,25 @@ func readSocks5Request(conn net.Conn, buf []byte) (int, error) {
 		return 0, err
 	}
 	addressLength := 0
+	// payloadStart is where the address (and then the port) continues after
+	// the 4-byte header: right after it, except for the domain form whose
+	// length byte is consumed first and must not be read twice
+	payloadStart := 4
+	// total request size: 4 header bytes, then the address (the domain form
+	// carries one extra length byte before the name), then the 2 port bytes
+	total := 0
 	switch buf[3] {
 	case socks5AddressIPv4:
-		addressLength = 4
+		total = 4 + 4 + 2
 	case socks5AddressIPv6:
-		addressLength = 16
+		total = 4 + 16 + 2
 	case socks5AddressDomain:
 		if _, err := io.ReadFull(conn, buf[4:5]); err != nil {
 			return 0, err
 		}
 		addressLength = int(buf[4])
+		payloadStart = 5
+		total = 5 + addressLength + 2
 	default:
 		// the rest of the request (port) is still consumed so the reply can be
 		// written and the connection closed cleanly
@@ -195,11 +201,10 @@ func readSocks5Request(conn net.Conn, buf []byte) (int, error) {
 			"unsupported SOCKS5 address type 0x%02x", buf[3])
 	}
 
-	total := 4 + 1 + addressLength + 2
 	if total > len(buf) {
 		return 0, socks5Fail(socks5ReplyAddressNotSupported, "oversized SOCKS5 request")
 	}
-	if _, err := io.ReadFull(conn, buf[4:total]); err != nil {
+	if _, err := io.ReadFull(conn, buf[payloadStart:total]); err != nil {
 		return 0, err
 	}
 	return total, nil
@@ -472,7 +477,9 @@ func (f *dynamicForwarder) serveSOCKSConnection(conn net.Conn) {
 // returns it only once the server confirmed it reached the target.
 func (f *dynamicForwarder) openDynamicForwardStream(target *ssh3Messages.DynamicForwardTarget) (io.ReadWriteCloser, error) {
 	targetDescription := net.JoinHostPort(target.Address, strconv.Itoa(int(target.Port)))
-	channel, err := f.conversation.OpenChannel(ssh3Messages.ChannelTypeDynamicForwardTCP, 30000, socks5ChannelWindow)
+	// the data channel is a byte tunnel: no datagrams flow through it, and a
+	// non-zero queue size here would allocate a huge channel per connection
+	channel, err := f.conversation.OpenChannel(ssh3Messages.ChannelTypeDynamicForwardTCP, 30000, 0)
 	if err != nil {
 		return nil, socks5Fail(socks5ReplyHostUnreachable,
 			"could not open the dynamic forwarding channel for %s: %s", targetDescription, err)
