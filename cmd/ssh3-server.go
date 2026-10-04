@@ -1081,6 +1081,20 @@ func ServerMain() int {
 					go handleReverseForwardChannel(conv, channel)
 					continue
 				}
+				if channel.ChannelType() == ssh3Messages.ChannelTypeDynamicForward {
+					log.Debug().Msgf("accepted dynamic-forward control channel %d", channel.ChannelID())
+					// own goroutine, own lifetime: the control channel's
+					// lifetime is the dynamic forwarding (-D) session
+					go handleDynamicForwardChannel(conv, channel)
+					continue
+				}
+				if channel.ChannelType() == ssh3Messages.ChannelTypeDynamicForwardTCP {
+					log.Debug().Msgf("accepted dynamic-forward-tcp channel %d", channel.ChannelID())
+					// own goroutine, own lifetime: each bridged connection
+					// ends on its own, the conversation stays up
+					go serveDynamicForwardDataChannel(conv.Context(), getActiveDynamicForwardState(conv), channel)
+					continue
+				}
 				log.Debug().Msgf("accepted session channel %d of type %q", channel.ChannelID(), channel.ChannelType())
 				runningSessions.Insert(channel, &runningSession{
 					channelState:   LARVAL,

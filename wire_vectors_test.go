@@ -103,6 +103,38 @@ func TestDumpWireVectors(t *testing.T) {
 		BoundPort: 0,
 		ErrorUTF8: "bind: address already in use",
 	}))
+
+	// Dynamic SOCKS forwarding (-D) payloads. Like the -R ones, they travel as
+	// channel data behind a varint(version) | varint(kind) prefix: kind 1/2 on
+	// the "dynamic-forward" control channel, kind 3/4 on each
+	// "dynamic-forward-tcp" channel.
+	dump("channel_header_dynamic_forward_control", buildHeader(4, message.ChannelTypeDynamicForward, 30000, nil))
+	dump("channel_header_dynamic_forward_tcp", buildHeader(4, message.ChannelTypeDynamicForwardTCP, 30000, nil))
+	dump("dynamic_forward_request", writeMessage(t, &message.RequestDynamicForward{
+		BindAddress: "127.0.0.1",
+		BindPort:    1080,
+	}))
+	dump("dynamic_forward_request_wildcard", writeMessage(t, &message.RequestDynamicForward{
+		BindAddress: "*",
+		BindPort:    0,
+	}))
+	dump("dynamic_forward_reply_ok", writeMessage(t, &message.DynamicForwardReply{BoundPort: 1080}))
+	dump("dynamic_forward_reply_error", writeMessage(t, &message.DynamicForwardReply{
+		BoundPort: 0,
+		ErrorUTF8: "dynamic forwarding not requested",
+	}))
+	dump("dynamic_forward_target_hostname", writeMessage(t, &message.DynamicForwardTarget{
+		Address: "example.com",
+		Port:    443,
+	}))
+	dump("dynamic_forward_target_ipv4", writeMessage(t, &message.DynamicForwardTarget{
+		Address: "192.0.2.10",
+		Port:    80,
+	}))
+	dump("dynamic_forward_target_reply_ok", writeMessage(t, &message.DynamicForwardTargetReply{}))
+	dump("dynamic_forward_target_reply_error", writeMessage(t, &message.DynamicForwardTargetReply{
+		ErrorUTF8: "dial tcp 192.0.2.10:80: connect: connection refused",
+	}))
 }
 
 func strings140() string {
