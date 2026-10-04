@@ -83,6 +83,8 @@ Rust ist kein reines Codec-Experiment mehr: funktionierende Client- und Server-B
 | SSH-Agent-Forwarding | Ja | Ja | Nur Unix-Sockets; aus Windows-Clients nicht verfügbar. |
 | Direktes TCP-Forwarding | Ja | Ja | Die Rust-Runtime unterstützt es; die Rust-CLI exponiert die Forwarding-Flags noch nicht. |
 | Direktes UDP-Forwarding | Ja | Ja | Die Rust-Runtime unterstützt es; die Rust-CLI exponiert die Forwarding-Flags noch nicht. |
+| Reverse-TCP/UDP-Forwarding | Ja | Nein | `-R`, derzeit nur Go. |
+| Dynamisches SOCKS-Forwarding | Ja | Nein | `-D`, derzeit nur Go. |
 | Proxy jump | Ja | Nein | Derzeit nur Go. |
 | Geheimer URL-Pfad / versteckter Serverpfad | Ja | Nein | Derzeit nur Go. |
 | Automatisierung öffentlicher Zertifikate | Ja | Nein | Der Go-Server unterstützt Let's Encrypt; der Rust-Server derzeit nur selbstsignierte Zertifikate. |
@@ -122,17 +124,17 @@ Usage: ssh3-server [OPTIONS]
 Beim Rust-Client sind dateibasierte Secret-Flags wie `--password-file`, `--bearer-token-file` und `--oidc-client-secret-file` zu bevorzugen: Sie lecken weniger über Shell-History, Prozesslisten und CI-Logs.
 
 ### Go
-Go 1.21 oder neuer. Das Repository trägt einen vendored Rust-`h3`-Crate (den `:protocol=ssh3`-Shim) ohne Go-`vendor/modules.txt` — Go muss daher im Module-Modus bleiben:
+Go 1.21 oder neuer. Das Repository trägt einen vollständigen `vendor/`-Baum, die Builds unten funktionieren also so wie sie dastehen:
 
 ```bash
-CGO_ENABLED=0 GOFLAGS=-mod=mod go build -o ssh3 ./cmd/ssh3
-CGO_ENABLED=0 GOFLAGS=-mod=mod go build -tags disable_password_auth -o ssh3-server ./cmd/ssh3-server
+CGO_ENABLED=0 go build -o ssh3 ./cmd/ssh3
+CGO_ENABLED=0 go build -tags disable_password_auth -o ssh3-server ./cmd/ssh3-server
 ```
 
 Release-Client-Builds und arm-Server-Builds verwenden `CGO_ENABLED=0` mit `-tags disable_password_auth` — Passwortauthentifizierung ist dann vollständig aus dem Binary entfernt. Der amd64-Release-Server wird mit CGO und ohne den Tag gebaut: das Shadow/crypt-Backend ist einkompiliert, aber standardmäßig deaktiviert. Wer Passwortauthentifizierung im eigenen Linux-Build möchte:
 
 ```bash
-CGO_ENABLED=1 GOFLAGS=-mod=mod go build -o ssh3-server ./cmd/ssh3-server
+CGO_ENABLED=1 go build -o ssh3-server ./cmd/ssh3-server
 ```
 
 ## Schnellstart
@@ -243,7 +245,7 @@ ssh3 -O exit -control-path ~/.ssh3/cm-user@host:443 user@host
 | `-control-master no\|yes\|auto` | `auto` nutzt einen laufenden Master und startet sonst einen; `yes` startet immer; Standard `no` |
 | `-control-path PFAD` | Pfad des Steuerungs-Sockets; Standard `~/.ssh3/cm-<user>@<host>:<port>`, Rechte 0600 |
 | `-control-persist no\|yes\|<Sekunden>` | Master nach Sitzungsende im Hintergrund halten; `yes` = unbegrenzt, Zahl = Idle-Timeout |
-| `-O exit` | Master beenden (benötigt das Ziel-Operand, wie OpenSSH) |
+| `-O check\|stop\|exit` | Steuerungsoperation auf einem laufenden Master; das Ziel-Operand wird weiterhin gebraucht, sofern nicht explizit `-control-path` gesetzt ist, und ein unbekannter Wert wird vorab mit der Liste der unterstützten Werte abgelehnt |
 
 Hinweise: der Master ist eine abgelöste Kopie dieses Binärprogramms
 (`SSH3_CM_DAEMON=1`); jede Slave-Sitzung, TCP/UDP-Weiterleitung und das
@@ -253,7 +255,52 @@ multiplext. Der Median von 100 aufeinanderfolgenden Execs sinkt von
 Handshake. Einschränkungen: `-proxy-jump` ist inkompatibel (die Kombination
 mit `-control-master` ist ein Fehler), Windows wird nicht unterstützt.
 Interaktive pty-Slave-Sitzungen leiten Fensteränderungen und außerbandige
-Signale durch den Master.
+Signale durch den Master. Ein Steuerungs-Socket, den ein abgebrochener
+Master hinterlässt, wird erkannt und entfernt, statt für die gesamte
+Wartefrist mit `EADDRINUSE` zu scheitern – ein veralteter Pfad blockiert den
+nächsten Start also nicht mehr.
+
+### Steuerungsoperationen
+
+| Operation | Verhalten |
+|-----------|-----------|
+| `-O check` | Master-Status (pid, Laufzeit, aktive Sitzungen, weitergeleitete Kanäle) auf stdout ausgeben und mit 0 beenden |
+| `-O stop` | Master beenden und warten, bis der Steuerungs-Socket tatsächlich freigegeben ist |
+| `-O exit` | Master beenden (historisches Verhalten) |
+
+`check` kostet einen Steuerungs-Roundtrip und keine Sitzung und ist damit
+günstig genug, um sie aus Skripten und Orchestratoren abzufragen. Läuft kein
+Master, endet der Aufruf mit einer klaren Fehlermeldung und einem
+von null verschiedenen Exit-Code, statt zu hängen. Eine Operation, die der
+Build nicht kennt, weist der Master mit einer lesbaren Fehlermeldung ab, und
+die Verbindung bleibt für einen korrekten Wiederholungsversuch nutzbar.
+
+`exit` bleibt bewusst auf dem historischen Steuerungsframe, damit Master der
+Versionen v0.1.22/v0.1.23 weiterhin sauber herunterfahren. Die neueren
+Operationen erhalten von einem älteren Master die explizite Meldung *„the
+control master does not support … control operation"*, sodass ein alter Peer
+sie sofort ablehnt, statt den Client warten zu lassen.
+
+Alle drei Operationen sind über die Kommandozeile erreichbar: `check`, `stop`
+und `exit` werden sowohl im `-control-path`-Schnellpfad als auch im normalen
+Pfad dispatcht, und ein Wert außerhalb der Menge wird vorab mit der Liste der
+unterstützten Operationen abgelehnt — noch bevor ein Schlüssel oder die
+known_hosts-Datei gelesen wird:
+
+```bash
+# einen laufenden Master nach seinem Status fragen
+ssh3 -O check user@host
+
+# ihn beenden und warten, bis der Steuerungs-Socket tatsächlich freigegeben ist
+ssh3 -O stop user@host
+```
+
+`exit` bleibt bewusst auf dem historischen Steuerungsframe, damit Master der
+Versionen v0.1.22/v0.1.23 weiterhin sauber herunterfahren. Die neueren
+Operationen erhalten von einem älteren Master die explizite Meldung *„the
+control master does not support … control operation"*, sodass ein alter Peer
+sie sofort ablehnt, statt den Client warten zu lassen.
+
 
 ## Port-Weiterleitung
 Lokale TCP- und UDP-Weiterleitungen laufen auf dem Client und werden über die
@@ -271,16 +318,308 @@ zu starten; `Strg+C` baut sie ab:
 ssh3 -N -forward-tcp 8080/10.0.0.10@80 user@host
 ```
 
-Rückwärtige Weiterleitung (`-R`, ein Listener auf dem Server) ist noch nicht
-implementiert; siehe „Bekannte Lücken“.
+### Rückwärtige Weiterleitung (`-R`)
+
+`-R` lässt den **Server** einen Listener binden und jede von ihm angenommene
+Verbindung zurück zu einem Ziel auf der Client-Seite überbrücken.
+
+```bash
+# der Server lauscht auf 127.0.0.1:8080 und brückt auf das lokale 127.0.0.1:80
+ssh3 -N -R 8080:127.0.0.1:80 user@host
+
+# ein UDP-Peer auf dem Server erreicht den lokalen Resolver
+ssh3 -N -R 5353/udp:127.0.0.1:53 user@host
+
+# an alle Schnittstellen binden (der Server warnt vor der weiten Bindung)
+ssh3 -N -R '*:8080:127.0.0.1:80' user@host
+```
+
+Das Flag hat die Form `[bind_address:]bind_port[/udp]:target_host:target_port`
+und ist wiederholbar. Standard ist TCP; das Suffix `/udp` hinter dem
+Bindungsport wählt UDP. Ohne Bindeadresse — und bei `localhost`, `127.0.0.1`
+oder `::1` — lauscht der Server nur auf seinem eigenen Loopback; `*` (wie
+`0.0.0.0` und `::`) verlangt eine Wildcard-Bindung, die der Server erlaubt,
+aber mit einer Warnung protokolliert. **Das Ziel wird auf dem Client
+aufgelöst**, wie es OpenSSH tut, der Server erhält also nur ein IP-Literal.
+Der übliche Begleiter ist `-N`: ohne Sitzung würde niemand die Schleife für
+serverseitig initiierte Kanäle starten.
+
+Zur Semantik: jeder Steuerungskanal `reverse-forward` des Clients trägt genau
+eine Bindungsanfrage als Kanaldaten, und der Server antwortet mit dem
+belegten Port — der Bindungsport `0` verlangt einen ephemeren, der tatsächlich
+belegte Port landet im Log. Jede angenommene Verbindung wird anschließend als
+**serverseitig initiierter Kanal `forwarded-tcp`** zurückgespiegelt, dessen
+zusätzliche Header-Bytes das Client-Ziel tragen (für UDP ein Kanal
+`forwarded-udp` pro entferntem Peer, wie beim direkten UDP-Forwarding). Der
+Client überbrückt nur Kanäle, deren Ziel tatsächlich über `-R` angefordert
+wurde, ein kompromittierter Server kann den Client also nicht beliebige lokale
+Ziele anwählen lassen; gleichzeitig sind höchstens 64 Kanäle pro Konversation
+offen. Das Schließen des Steuerungskanals oder der Verbindung gibt die Bindung
+frei.
+
+`-R` wird auf Kommandozeilenebene zusammen mit `-control-master` und `-f`
+abgelehnt. Ein alter Server, der den Kanal nicht kennt, schließt ihn ohne
+Antwort, und der Client meldet das als *„the server does not support reverse
+forwarding"*, statt zu hängen; ein Server ab v0.1.23 wird gebraucht.
+
+### Dynamische SOCKS-Weiterleitung (`-D`)
+
+`-D [bind_address:]port` öffnet einen lokalen SOCKS5-Proxy, dessen
+Verbindungen der entfernte Peer aufbaut – das `-D`-Äquivalent aus OpenSSH:
+
+```bash
+# SOCKS5-Proxy auf 127.0.0.1:1080, eine interaktive Sitzung leidet nicht darunter
+ssh3 -D 1080 user@host
+
+# an allen Schnittstellen lauschen und die Verbindung nur für den Proxy halten
+ssh3 -N -D '*:1080' user@host
+
+# der Port wird vom Kernel vergeben; der gewählte landet im Log
+ssh3 -D 0 user@host
+```
+
+Der Proxy spricht ausschließlich SOCKS5 *no authentication required* (er bindet
+einen lokalen Listener und überbrückt die Verbindung innerhalb von ssh3, sieht
+also nie Zugangsdaten), unterstützt den Befehl `CONNECT` und akzeptiert die
+Adresstypen IPv4, IPv6 und Domain. Ohne Bindeadresse hängt der Listener am
+Loopback, `*` an allen Schnittstellen; ein IPv6-Literal muss in eckigen
+Klammern stehen, sonst wird ein nacktes `::1:1080` abgelehnt statt falsch
+gelesen. Wie die direkten Weiterleitungen lässt sich der dynamische Proxy mit
+einer Sitzung oder mit `-N` kombinieren; im `-N`-Fall startet der Client die
+Kanalschleife selbst.
+
+Das Protokoll nutzt zwei Kanaltypen:
+
+1. Der Client öffnet einen Steuerungskanal `dynamic-forward` und sendet
+   darin eine Bindungsankündigung als Kanaldaten. Der Server bindet nichts –
+   er bestätigt nur, dass er den SOCKS-Listener des Clients bedienen wird.
+2. Für jede vom SOCKS-Listener angenommene Verbindung öffnet der Client
+   einen Kanal `dynamic-forward-tcp` mit der Zieladresse. Der Server löst
+   diese Adresse selbst auf, baut selbst die TCP-Verbindung auf und überbrückt
+   den Kanal mit dieser Verbindung. Ein **Hostname wird unverändert
+   weitergereicht** und vom Server aufgelöst, weil ein SOCKS-Client oft nur
+   den Namen kennt.
+
+Es wurden bewusst **keine neuen Message-Type-IDs** eingeführt: `ParseMessage`
+panicked bei unbekannten IDs, wodurch ältere Peers abstürzen würden, statt die
+Anfrage sauber abzulehnen. Alle Nutzlasten laufen daher als gewöhnliche
+Kanaldaten hinter einem versionierten Präfix (Protokollversion 1 +
+Nachrichtenart), sodass ein alter Peer sie einfach nie sieht.
+
+Pro Verbindung antwortet der Server mit dem Ergebnis des Verbindungsaufbaus,
+sodass ein Namensauflösungs- oder Verbindungsfehler für den SOCKS-Client als
+lesbarer Grund ankommt statt als stilles Hängen; der Textgrund wird auf den
+passenden SOCKS5-Antwortcode abgebildet (`connection refused`,
+`host unreachable`, `ttl expired`, …), der Client sieht also kein namenloses
+*„general failure"*. Pro Konversation werden höchstens 64
+`dynamic-forward-tcp`-Kanäle gleichzeitig überbrückt, und das Schließen des
+Steuerungskanals oder der Konversation reißt alle lebenden Brücken ab. Beide
+Hälften liegen im unveröffentlichten Baum, `-D` braucht also einen aus dieser
+Quelle gebauten Server.
+
+## Vertraute ssh(1)-Flags
+### Erzwungenes PTY (`-t`)
+
+Fehlt lokal ein Terminal – Pipe, Cron-Job, abgesetzter Start – wird kein PTY
+angefordert, und vollflächige Programme auf der Gegenseite starten nicht. `-t`
+fordert es trotzdem an:
+
+```bash
+# ein Vollbildprogramm mit pty starten, auch wenn stdin eine Pipe ist
+ssh3 -t user@host 'htop'
+
+# interaktive Shell mit pty, die Geometrie kommt von der lokalen Konsole
+ssh3 -t user@host
+```
+
+Der Terminaltyp wird aus `$TERM` übernommen (`xterm`, falls die Variable
+nicht gesetzt ist), die Geometrie aus der lokalen Konsole, mit einem Fallback
+auf **80x24**, wenn sie sich nicht ermitteln lässt: ein PTY in Standardgeometrie
+ist immer noch besser als eine nackte Pipe. `SIGHUP`, `SIGINT`, `SIGQUIT` und
+`SIGTERM` werden an das entfernte PTY weitergereicht, unter Unix wird
+`SIGWINCH` zu einer Fenstergrößenänderungsanfrage, damit `ssh3 -t user@host top`
+skalierbar bleibt. Unter Windows gibt es kein `SIGWINCH`: Die Konsole meldet
+eine Größenänderung per Ereignis statt per Signal, daher gilt die mit der
+PTY-Anfrage gesendete Geometrie für die ganze Sitzung.
+
+### Subsystem-Anfragen (`-s`)
+
+`-s NAME` fragt ein entferntes Subsystem an, statt einer Shell oder eines
+Kommandos:
+
+```bash
+# interaktive sftp-Shell über einen eigenen sftp-Kanal
+ssh3 -s sftp user@host
+```
+
+`sftp` wird gesondert vom interaktiven SFTP-Client bedient, dessen Befehle
+`pwd`, `ls`, `cd`, `get`, `put`, `mkdir`, `rm`, `rmdir`, `help`,
+`quit`/`exit` sind – also der für eine Sitzung am Prompt nützliche Teil von
+`sftp(1)`. Jeder andere Name wird, genau wie in `ssh(1)`, als
+Subsystem-Anfrage auf dem Sitzungskanal gesendet; der mitgelieferte
+Go-Server antwortet auf eine solche Anfrage mit *not implemented*, ein
+freier Name lohnt also nur gegen einen Server, der Subsysteme bedient. Mit
+`-t` wird das PTY vor dem Subsystem angefordert.
+
+`-s` belegt den Sitzungskanal und wird deshalb auf Kommandozeilenebene
+zusammen mit `-f`, `-N`, `-forward-agent`, `-R` und einem entfernten Kommando
+abgelehnt.
+
+### Alternative Konfigurationsdatei (`-F`)
+
+`-F PATH` liest eine andere Benutzerkonfigurationsdatei als `~/.ssh/config`;
+ohne `-F` liest der Client wie üblich `~/.ssh/config`. Der Pfad wird
+wörtlich verwendet, wie in OpenSSH, ein relativer Pfad bleibt also relativ
+zum aktuellen Verzeichnis:
+
+```bash
+ssh3 -F ./ci/ssh_config user@host 'uptime'
+ssh3 -F /home/deploy/.ssh/config.work user@host
+```
+
+Alles aus dem folgenden Abschnitt – `Host`, `Match`, `Include` – wird aus
+dieser Datei genauso aufgelöst. Ein unlesbarer Pfad lässt die Verbindung nicht
+scheitern: der Lesefehler geht nach stderr und die Konfiguration wird
+ignoriert, eine fehlende Datei wird stillschweigend übersprungen.
+
 
 ## Client-Konfiguration (~/.ssh/config)
 Neben `HostName`, `Port`, `User` und `IdentityFile` berücksichtigt der Client
 pro `Host`-Muster: `ProxyJump` (als ssh3-UDP-Proxy-Jump interpretiert: der
 Jump-Host muss ssh3-server ausführen), `UDPProxyJump` (Fork-Erweiterung,
 gleiche Semantik), `ForwardAgent` und `ServerAliveInterval` (Sekunden;
-stimmt den QUIC-Keepalive ab, Standard 1). `Include`-Direktiven löst die
-Konfigurationsbibliothek auf; `Match` wird noch nicht unterstützt.
+stimmt den QUIC-Keepalive ab, Standard 1).
+
+### `Match`-Blöcke
+`Match` wird von einem Vor-Parser aufgelöst, der vor dem Lauf des
+ssh_config-Decoders nur die für den angefragten Alias zutreffenden Blöcke
+abflacht; damit bleiben die „first obtained value wins“-Prioritäten aus
+`ssh_config(5)` erhalten. Unterstützte Kriterien: `all`, `final`, `host`,
+`originalhost`, `user`, `localuser` und `exec`, mit Negation über `!` und
+Glob-Mustern. Konfigurationen ohne jeden `Match`-Block nehmen den
+unveränderten schnellen Pfad.
+
+```text
+Host example.lan
+    User deploy
+    Match originalhost web*
+        Port 2222
+    Match exec "test -f /srv/maintenance"
+        ForwardAgent no
+```
+
+Zwei ssh3-spezifische Vereinfachungen folgen daraus, dass die Konfiguration
+in einem Durchgang angewendet wird und Hostnamen nie kanonisiert werden:
+`final` trifft immer zu, `canonical` nie. `host` und `user` werden gegen das
+wachsende Ziel ausgewertet, ein von einem früheren zutreffenden Block
+gesetztes `HostName` oder `User` ist also auch für spätere `Match`-Blöcke
+sichtbar. `exec` läuft unter unix über `sh -c`, unter Windows über `cmd /c`,
+und gilt bei Exit-Status 0 als erfüllt.
+
+### `Match` in `Include`-Dateien
+`Include` wird vom selben Vor-Parser aufgelöst, rekursiv und *bevor* alles
+andere geparst wird – der Inhalt der eingebundenen Datei tritt an die Stelle
+der Direktive und setzt den umgebenden `Host`- oder `Match`-Block fort,
+genau wie in OpenSSH.
+
+```text
+Include ~/.ssh/config.d/*.conf
+
+# ~/.ssh/config.d/web.conf
+Match host web*
+    Port 2222
+    IdentityFile ~/.ssh/id_ed25519_web
+```
+
+Bisher ließ jeder über ein `Include` erreichte `Match`-Block den
+ssh_config-Decoder scheitern und die gesamte `~/.ssh/config` wurde
+verworfen. Nun durchläuft ein eingebundener `Host`- oder `Match`-Block
+dieselbe Alias- und `Match`-Filterung wie die Hauptdatei. Unterstützt werden
+Glob-Muster in `Include`-Zielen, verschachtelte Includes, ein Schutz gegen
+zirkuläre Includes und eine Rekursionstiefe von 16. Ein fehlendes oder
+unlesbares Include wird übersprungen, statt den Rest der Konfiguration
+ungültig zu machen, und ein `Match`-Parsefehler nennt die eingebundene Datei
+sowie die Zeile, aus der er wirklich stammt.
+
+### SSHFP-Hostprüfung (RFC 4255)
+Die SSHFP-Engine vergleicht die für einen Host veröffentlichten
+DNS-Einträge vom Typ 44 mit dem echten Fingerabdruck des präsentierten
+Hostschlüssels. Der Fingerabdruck wird über das **DER-X.509-Zertifikat des
+Hosts** gebildet: ssh3 pinnt Zertifikate, keine rohen SSH-Public-Keys. Das
+DNS-Wire-Format wird im Projekt selbst aufgebaut und geparst, ein
+Drittanbieter-Resolver ist also nicht nötig.
+
+Standardmäßig aus, wie in OpenSSH; eingeschaltet wird die Prüfung mit `-o
+VerifyHostKeyDNS=...` oder demselben Schlüssel in `~/.ssh/config`, mit der
+üblichen Quellenpräzedenz (`-o` > `~/.ssh/config`, und der Standard bleibt
+aus):
+
+```bash
+# den Host ablehnen, wenn seine veröffentlichten SSHFP-Einträge nicht zum Schlüssel passen
+ssh3 -o VerifyHostKeyDNS=yes user@host
+
+# die Abfrage auf bestimmte Hostschlüssel-Algorithmen beschränken
+ssh3 -o VerifyHostKeyDNS=yes:ed25519,rsa user@host
+
+# derselbe Schlüssel pro Host in ~/.ssh/config
+```
+
+```text
+Host example.lan
+    VerifyHostKeyDNS yes:ed25519
+```
+
+Akzeptierte Werte:
+
+| Wert | Bedeutung |
+| --- | --- |
+| `no` (auch `false`, `off`, leer) | gar keine Abfrage – der Standard, also kein DNS-Verkehr und keine zusätzliche Latenz |
+| `ask` | die Einträge prüfen, wenn sie veröffentlicht sind |
+| `yes` (auch `true`, `on`) | die Einträge prüfen und eine Übereinstimmung verlangen |
+| `yes:algo[,algo...]` | wie oben, beschränkt auf die genannten Hostschlüssel-Algorithmen |
+
+Der Vergleich ist case-insensitiv, umgebende Leerraum wird ignoriert. Die
+Algorithmusliste akzeptiert die kurzen und die vollen Public-Key-Namen – `rsa`,
+`ssh-rsa`, `dsa`, `ssh-dss`, `ssh-dsa`, `ecdsa`, `ecdsa-sha2-nistp256`,
+`ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521`, `sk-ecdsa-sha2-nistp256`,
+`ed25519`, `ssh-ed25519` – sowie die Digest-Namen `sha1` und `sha256`, die
+OpenSSH aus Kompatibilitätsgründen ebenfalls akzeptiert. Ein Hostschlüssel
+außerhalb der Liste ist von der Anfrage schlicht nicht abgedeckt, und für ihn
+wird die Abfrage übersprungen. Ein unbekannter Wert oder Algorithmus wird vor
+dem Verbindungsaufbau abgelehnt, mit demselben *„Bad configuration option"* wie
+jede andere fehlerhafte `-o`-Angabe.
+
+Die Politik ist bewusst vorsichtig:
+
+- **Nur eine Abweichung lehnt den Host ab** – Einträge wurden veröffentlicht,
+  wurden geholt, und keiner passt zum präsentierten Schlüssel. NXDOMAIN, eine
+  leere Antwort, ein abgeschnittenes Datagramm, ein Timeout, ein nicht
+  verfügbarer Resolver und Netzwerkfehler sind alles *weiche Überspringungen*:
+  die Verbindung läuft allein nach der known_hosts-Entscheidung weiter. Das ist
+  ein strikt zusätzliches Signal über die known_hosts-Prüfung hinaus, niemals
+  deren Ersatz.
+- `ask` fragt nicht nach. Eine Abweichung unter `ask` lehnt ab, mit einer
+  Warnung, die die Option nennt, mit der sie sich übersteuern ließe.
+- Mit `-o StrictHostKeyChecking=no` warnt eine Abweichung nur, und die
+  Verbindung läuft weiter – genau wie die Prüfung des gepinnten Zertifikats bei
+  einem geänderten Zertifikat.
+- Der Austausch ist standardmäßig auf **2 s** begrenzt, die konfigurierten
+  DNS-Server werden der Reihe nach abgefragt.
+- Die Abfrage läuft direkt nach dem Verbindungsaufbau, auf demselben
+  Zertifikat, das die known_hosts-Prüfung verwendet, und fragt den blanken
+  DNS-Namen ab (`user@` und `:port` haben keine DNS-Bedeutung). `-insecure`
+  überspringt die Hostprüfung vollständig, also auch SSHFP.
+- Unter Windows liegt die Resolver-Konfiguration in der Registry statt in
+  `/etc/resolv.conf`, die Server werden daher über `GetAdaptersAddresses` aus
+  den lokalen Adaptern gelesen. Liefert diese Aufzählung nichts, ist die
+  Abfrage eine weiche Überspringung und kein Fehler.
+- Die Eintrags-Algorithmen RSA, DSA, ECDSA und Ed25519 werden erkannt;
+  SHA-1- und SHA-256-Fingerabdrücke werden beide berechnet. RSA-, ECDSA- und
+  Ed25519-Hostschlüssel werden dagegen geprüft.
+
+Die Prüfung liegt im unveröffentlichten Baum, für einen End-to-End-Durchlauf
+werden also Client und Server aus dieser Quelle gebaut.
+
 
 ## Authentifizierung
 ### Public Key
@@ -401,18 +740,18 @@ Die Interop-Suite lässt echte Rust- und Go-Binaries gegeneinander laufen:
 - SSH-Agent-Authentifizierung und Agent-Forwarding
 - TCP- und UDP-Forwarding
 
-Bei direkten Go-Befehlen das Toolchain wegen des vendored Rust-Shims im Module-Modus halten:
+Bei direkten Go-Befehlen reichen die vendored Abhängigkeiten aus:
 
 ```bash
-GOFLAGS=-mod=mod go build ./...
+go build ./...
 ```
 
 ## Bekannte Lücken
-- Rückwärtige Weiterleitung (`-R`): Der Server kann noch nicht gebeten werden, einen Remote-Port zu überwachen und Verbindungen zurück zum Client zu brücken; dafür ist eine kleine Protokollerweiterung nötig (siehe CHANGELOG).
 - Der Rust-Server ist heute bewusst minimal: nur selbstsignierte Zertifikate, kein geheimer URL-Pfad, keine Automatisierung öffentlicher Zertifikate.
 - Die Rust-CLI exponiert noch keine TCP-/UDP-Forwarding- oder Proxy-Jump-Flags, obwohl die Runtime implementiert und getestet ist.
-- Der vendored `h3`-Patch ist ein bewusster Kompatibilitäts-Shim für die beliebte `:protocol=ssh3`-Behandlung und muss noch aufgeräumt werden.
-- Der Windows-Client hat kein SSH-Agent-Forwarding und leitet keine Fenstergrößenänderungen weiter; die erste Verbindung zu einem selbstsignierten Server erfordert ein in `known_hosts` hinterlegtes Zertifikat, da die interaktive TOFU-Abfrage ein Unix-typisches tty braucht.
+- Rückwärtige Weiterleitung (`-R`) und dynamisches SOCKS-Forwarding (`-D`) gibt es nur im Go-Client und im Go-Server, und beide sind neuer als das letzte Release: ein Server, der sie nicht kennt, lehnt die Anfrage mit einem expliziten „not supported"-Fehler ab.
+- Der Windows-Client hat kein SSH-Agent-Forwarding und leitet keine Fenstergrößenänderungen weiter (in Go gibt es dort kein `SIGWINCH`); die erste Verbindung zu einem selbstsignierten Server erfordert ein in `known_hosts` hinterlegtes Zertifikat, da die interaktive TOFU-Abfrage ein Unix-typisches tty braucht.
+- Der Go-Server implementiert keine Subsystem-Anfragen, heute ist daher nur das Subsystem `sftp` nutzbar (`ssh3 -s sftp`).
 
 ## Sicherheit
 SSH3 ist vielversprechend, aber das Projekt braucht noch erhebliche Prüfung, bevor man ihm in der Produktion vertrauen kann. Die Protokolloberfläche kombiniert TLS 1.3, QUIC, HTTP-Autorisierung und SSH-artige Kanalsemantik — der richtige Maßstab ist eine lange Phase von Reviews und Interop-Härtung, nicht „läuft auf meiner Maschine“.
