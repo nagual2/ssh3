@@ -4,7 +4,7 @@ All notable changes to the **nagual2 fork** of SSH3, starting from the first for
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); each section maps to a release tag, newest first.
 
-## [Unreleased]
+## [0.1.24] - 2026-10-04
 
 ### Added
 - **`Match` inside `Include` files** (`~/.ssh/config`): `Include` is now expanded by the `Match`-aware pre-parser itself, recursively, before the ssh_config decoder sees the text. Until now any `Match` block reached through an `Include` aborted the decoder and the whole `~/.ssh/config` was thrown away; now the content of an included file goes through the same alias and `Match` filtering as the main file, so an included `Host` or `Match` block behaves exactly as if it had been written inline. Glob patterns in `Include` targets, nested includes, a cyclic-include guard, and a recursion depth limit of 16 are supported. A missing or unreadable include is skipped instead of invalidating the rest of the configuration, and a `Match` parse error now names the included file and the line it actually comes from instead of pointing at the main config.
