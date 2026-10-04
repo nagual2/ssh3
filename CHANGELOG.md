@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); eac
 
 ## [Unreleased]
 
+## [0.1.23] - 2026-10-04
+
 ### Added
 - **Reverse forwarding (`-R`)**: `-R [bind:]port[/udp]:target:targetport` asks the server to bind a TCP or UDP listener (loopback by default, wide binds warn, ephemeral ports report the actual port); every accepted connection or datagram comes back over a server-initiated `forwarded-tcp`/`forwarded-udp` channel and is bridged to the client-local target. Targets are validated against the `-R` list, forwarded channels are capped per conversation. Older peers reject the extension gracefully — verified live against a v0.1.22 server and an old client against the new server.
 - **`StrictHostKeyChecking`** (`ask|yes|accept-new|no`) with OpenSSH-style priority: CLI flag > `-o` > `~/.ssh/config` > `ask`. Known-host pins are compared on the server certificate after the dial; a changed fingerprint refuses the connection with both `SHA256:` fingerprints in the error; `accept-new` pins automatically; `no` explicitly allows cert changes with a warning.
