@@ -1,7 +1,8 @@
 package ssh3
 
 // Unit tests for the StrictHostKeyChecking policy: value parsing (OpenSSH
-// semantics) and the precedence between configuration sources.
+// semantics), the precedence between configuration sources, and the way the
+// optional SSHFP verification plugs into the policy.
 
 import "testing"
 
@@ -86,5 +87,124 @@ func TestResolveStrictHostKeyChecking(t *testing.T) {
 					c.cliFlagSet, c.cliFlagValue, c.optionValue, c.configValue, got, c.want)
 			}
 		})
+	}
+}
+
+func TestParseVerifyHostKeyDNS(t *testing.T) {
+	cases := []struct {
+		value string
+		want  VerifyHostKeyDNS
+		ok    bool
+	}{
+		{"no", VerifyHostKeyDNSNo, true},
+		{"NO", VerifyHostKeyDNSNo, true},
+		{" false ", VerifyHostKeyDNSNo, true},
+		{"ask", VerifyHostKeyDNSAsk, true},
+		{"Ask", VerifyHostKeyDNSAsk, true},
+		{"yes", VerifyHostKeyDNSYes, true},
+		{"true", VerifyHostKeyDNSYes, true},
+		{"on", VerifyHostKeyDNSYes, true},
+		{"", VerifyHostKeyDNSNo, true},
+		{"maybe", "", false},
+		{"1", "", false},
+	}
+	for _, c := range cases {
+		got, err := ParseVerifyHostKeyDNS(c.value)
+		if c.ok {
+			if err != nil {
+				t.Errorf("ParseVerifyHostKeyDNS(%q) returned error %s, want %q", c.value, err, c.want)
+			} else if got != c.want {
+				t.Errorf("ParseVerifyHostKeyDNS(%q) = %q, want %q", c.value, got, c.want)
+			}
+		} else if err == nil {
+			t.Errorf("ParseVerifyHostKeyDNS(%q) = %q, want an error", c.value, got)
+		}
+	}
+}
+
+func TestResolveVerifyHostKeyDNS(t *testing.T) {
+	cases := []struct {
+		name       string
+		cliSet     bool
+		cliValue   string
+		option     string
+		config     string
+		want       VerifyHostKeyDNS
+		wantErrFor string
+	}{
+		{"default is off", false, "", "", "", VerifyHostKeyDNSNo, ""},
+		{"flag wins", true, "yes", "no", "no", VerifyHostKeyDNSYes, ""},
+		{"option wins over config", false, "", "ask", "no", VerifyHostKeyDNSAsk, ""},
+		{"config alone", false, "", "", "yes", VerifyHostKeyDNSYes, ""},
+		{"invalid flag", true, "maybe", "", "", "", "maybe"},
+		{"invalid option", false, "", "maybe", "", "", "maybe"},
+		{"invalid config", false, "", "", "maybe", "", "maybe"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := ResolveVerifyHostKeyDNS(c.cliSet, c.cliValue, c.option, c.config)
+			if c.wantErrFor != "" {
+				if err == nil {
+					t.Fatalf("ResolveVerifyHostKeyDNS = %q, want an error", got)
+				}
+				invalid, ok := err.(InvalidVerifyHostKeyDNSValue)
+				if !ok {
+					t.Fatalf("error type = %T, want InvalidVerifyHostKeyDNSValue", err)
+				}
+				if invalid.Value != c.wantErrFor {
+					t.Errorf("error reports %q, want %q", invalid.Value, c.wantErrFor)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ResolveVerifyHostKeyDNS returned error %s", err)
+			}
+			if got != c.want {
+				t.Errorf("ResolveVerifyHostKeyDNS = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// SSHFP is an optional, off-by-default verification: a DNS lookup must never
+// delay a command by default, and it must only ever be a *refusal* signal, in
+// addition to the known_hosts check.
+func TestSSHFPEnforcement(t *testing.T) {
+	cases := []struct {
+		name   string
+		verify VerifyHostKeyDNS
+		status SSHFPStatus
+		want   bool
+	}{
+		{"disabled never enforces", VerifyHostKeyDNSNo, SSHFPStatusMismatch, false},
+		{"disabled does not enforce a match either", VerifyHostKeyDNSNo, SSHFPStatusVerified, false},
+		{"yes rejects on mismatch", VerifyHostKeyDNSYes, SSHFPStatusMismatch, true},
+		{"ask rejects on mismatch", VerifyHostKeyDNSAsk, SSHFPStatusMismatch, true},
+		{"yes accepts on match", VerifyHostKeyDNSYes, SSHFPStatusVerified, false},
+		{"yes stays soft without records", VerifyHostKeyDNSYes, SSHFPStatusNoRecords, false},
+		{"yes stays soft on lookup failure", VerifyHostKeyDNSYes, SSHFPStatusLookupFailed, false},
+		{"yes stays soft when not checked", VerifyHostKeyDNSYes, SSHFPStatusNotChecked, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := SSHFPRejectsHost(c.verify, c.status); got != c.want {
+				t.Errorf("SSHFPRejectsHost(%q, %s) = %v, want %v", c.verify, c.status, got, c.want)
+			}
+		})
+	}
+}
+
+// A host that is only rejected by SSHFP must be reported as such, so that the
+// caller can tell an SSHFP failure from a known_hosts failure.
+func TestSSHFPRejectionError(t *testing.T) {
+	err := SSHFPRejectionError("sshfp.example.org:443/ssh3-term")
+	if err == nil {
+		t.Fatal("SSHFPRejectionError returned nil")
+	}
+	if _, ok := err.(SSHFPMismatchError); !ok {
+		t.Fatalf("error type = %T, want SSHFPMismatchError", err)
+	}
+	if got := err.Error(); got == "" {
+		t.Error("error message is empty")
 	}
 }
