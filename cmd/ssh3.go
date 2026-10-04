@@ -70,7 +70,7 @@ type quicTuning struct {
 }
 
 func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog io.Writer, ssh3Dir string, certPool *x509.CertPool, knownHostsPath string, knownHosts ssh3.KnownHosts,
-	strictHostKeyChecking ssh3.StrictHostKeyChecking,
+	strictHostKeyChecking ssh3.StrictHostKeyChecking, verifyHostKeyDNS verifyHostKeyDNSSetting,
 	oidcConfig []*oidc.OIDCConfig, options *client_config.Config, proxyRemoteAddr *net.UDPAddr, tty *os.File, tuning quicTuning) (*quic.Conn, int) {
 
 	var err error
@@ -208,6 +208,17 @@ func setupQUICConnection(ctx context.Context, skipHostVerification bool, keylog 
 					}
 				case ssh3.HostCertificateMatches:
 					// the pinned certificate is the one being used
+				}
+
+				// SSHFP (VerifyHostKeyDNS) is checked on the very same
+				// certificate: the pinned-certificate check answers "is this the
+				// key we saw last time?", SSHFP answers "does the zone vouch for
+				// this key?". options.Hostname() is used rather than the
+				// canonical host key because SSHFP records are published for the
+				// bare DNS name (user@ and :port carry no DNS meaning).
+				if _, err := checkHostKeySSHFP(ctx, options.Hostname(), peerCerts[0], verifyHostKeyDNS, strictHostKeyChecking); err != nil {
+					qClient.CloseWithError(quic.ApplicationErrorCode(0), "the SSHFP records of the server do not match its host key")
+					return nil, -1
 				}
 			}
 		}
@@ -555,7 +566,7 @@ func ClientMain() int {
 	displayVersion := flag.Bool("version", false, "if set, displays the software version on standard output and exit")
 	streamRxMiB := flag.Int("stream-rx-mb", 8, "initial per-stream flow control receive window in MiB")
 	connRxMiB := flag.Int("conn-rx-mb", 16, "initial connection-level flow control receive window in MiB")
-	controlOp := flag.String("O", "", "control operation on an existing control master: only \"exit\" is supported")
+	controlOp := flag.String("O", "", "control operation on an existing control master: check, stop or exit")
 	controlMaster := flag.String("control-master", "no", "share one connection across invocations: no, yes or auto (reuse a running master, else start one in background; not compatible with -proxy-jump; unsupported on windows)")
 	controlPathFlag := flag.String("control-path", "", "control master unix socket path (default ~/.ssh3/cm-<user>@<host>:<port>)")
 	controlPersist := flag.String("control-persist", "no", "keep the master in background after the session ends: no, yes or a number of seconds (idle timeout)")
@@ -574,6 +585,10 @@ func ClientMain() int {
 	resumeMode := flag.Bool("continue", false, "file transfer mode: resume interrupted transfers instead of overwriting")
 	verifyChecksum := flag.Bool("checksum", false, "file transfer mode: verify the transfer with a SHA-256 re-read (automatic for files over 32 MiB)")
 	noSession := flag.Bool("N", false, "do not execute a remote command or session; hold the connection open for the forwards (use with -forward-tcp/-forward-udp)")
+	configFileFlag := flag.String("F", "", "specifies an alternative per-user configuration file (default ~/.ssh/config)")
+	dynamicForward := flag.String("D", "", "dynamic (SOCKS5) port forwarding: [bind_address:]port (an empty or \"*\" bind address listens on every interface, no address means localhost)")
+	forcePTY := flag.Bool("t", false, "force pseudo-terminal allocation, even when the local standard input is not a terminal")
+	subsystem := flag.String("s", "", "request a remote subsystem: \"sftp\" opens the interactive SFTP client, any other name requests that subsystem")
 
 	var flagValues []*FlagValue
 	cliParsers, err := internal.GetPluginsCLIArgs()
@@ -591,9 +606,55 @@ func ClientMain() int {
 	flag.Parse()
 	args := flag.Args()
 
+	// detect whether -strict-host-key-checking and -s were explicitly set on the
+	// command line: an explicit flag takes precedence over -o and ssh config
+	strictFlagSet := false
+	subsystemFlagSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "strict-host-key-checking" {
+			strictFlagSet = true
+		}
+		if f.Name == "s" {
+			subsystemFlagSet = true
+		}
+	})
+
 	if len(reverseForwardsFlag) > 0 && (*controlOp != "" || *controlMaster != "no") {
 		log.Error().Msgf("-R is not compatible with -control-master")
 		return -1
+	}
+
+	// -O is validated up front so that a typo is reported with the list of
+	// supported operations instead of reaching the control socket layer
+	if *controlOp != "" {
+		if err := validateControlOperation(*controlOp); err != nil {
+			log.Error().Msgf("%s", err)
+			return -1
+		}
+	}
+
+	// -D opens a local SOCKS listener: parse the specification now so a bad
+	// value is rejected before a single QUIC packet is sent
+	var dynamicForwardSpecValue dynamicForwardSpec
+	if *dynamicForward != "" {
+		spec, err := parseDynamicForwardSpec(*dynamicForward)
+		if err != nil {
+			log.Error().Msgf("%s", err)
+			return -1
+		}
+		dynamicForwardSpecValue = spec
+	}
+
+	// -s requests a subsystem instead of a shell/command: the subsystem name is
+	// validated here for the same reason
+	subsystemName := ""
+	if *subsystem != "" || subsystemFlagSet {
+		name, err := parseSubsystemName(*subsystem)
+		if err != nil {
+			log.Error().Msgf("%s", err)
+			return -1
+		}
+		subsystemName = name
 	}
 
 	if len(reverseForwardsFlag) > 0 && *fileTransfer {
@@ -618,17 +679,9 @@ func ClientMain() int {
 	if fastCM {
 		cmCtx := context.Background()
 		if *controlOp != "" {
-			if *controlOp != "exit" {
-				log.Error().Msgf("unsupported control operation %q, only \"exit\"", *controlOp)
-				return -1
-			}
 			opCtx, cancel := context.WithTimeout(cmCtx, 5*time.Second)
 			defer cancel()
-			if err := client.ExitMaster(opCtx, *controlPathFlag); err != nil {
-				log.Error().Msgf("control operation failed: %s", err)
-				return -1
-			}
-			return 0
+			return runControlOp(opCtx, *controlPathFlag, *controlOp)
 		}
 		if !client.PingMaster(cmCtx, *controlPathFlag) {
 			if err := startDetachedMaster(); err != nil {
@@ -674,19 +727,12 @@ func ClientMain() int {
 		cliOptions[v.pluginOptionName] = v.parsedOption
 	}
 
-	// detect whether -strict-host-key-checking was explicitly set on the
-	// command line: an explicit flag takes precedence over -o and ssh config
-	strictFlagSet := false
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "strict-host-key-checking" {
-			strictFlagSet = true
-		}
-	})
-
 	// apply the -o Key=Value overrides: StrictHostKeyChecking is handled
 	// natively, other keywords are routed to the registered option parsers
 	// (the auth plugins' config keywords, e.g. IdentityFile)
 	strictOptionValue := ""
+	verifyHostKeyDNSOptionValue := ""
+	verifyHostKeyDNSOptionSet := false
 	parsersByKeyword := make(map[string]client_config.OptionName)
 	for optionName, parser := range cliParsers {
 		keyword := strings.ToLower(parser.OptionConfigName())
@@ -703,6 +749,17 @@ func ClientMain() int {
 				return -1
 			}
 			strictOptionValue = strings.TrimSpace(value)
+			continue
+		}
+		if strings.EqualFold(key, "VerifyHostKeyDNS") {
+			// validated here so a bad -o value is rejected like every other
+			// unknown or malformed option, before the connection is set up
+			if _, err := parseVerifyHostKeyDNSValue(value); err != nil {
+				log.Error().Msgf("%s", err)
+				return -1
+			}
+			verifyHostKeyDNSOptionValue = strings.TrimSpace(value)
+			verifyHostKeyDNSOptionSet = true
 			continue
 		}
 		if optionName, ok := parsersByKeyword[strings.ToLower(key)]; ok {
@@ -775,6 +832,27 @@ func ClientMain() int {
 	if *noSession && *fileTransfer {
 		fmt.Fprintln(os.Stderr, "-N cannot be combined with -f")
 		return -1
+	}
+
+	if subsystemName != "" {
+		// a subsystem owns the session channel: it cannot be combined with the
+		// modes that also want it, nor with a remote command to run instead
+		if *fileTransfer {
+			fmt.Fprintln(os.Stderr, "-s cannot be combined with -f")
+			return -1
+		}
+		if *noSession {
+			fmt.Fprintln(os.Stderr, "-s cannot be combined with -N")
+			return -1
+		}
+		if len(args) > 1 {
+			fmt.Fprintln(os.Stderr, "-s cannot be combined with a remote command")
+			return -1
+		}
+		if *forwardSSHAgent || len(reverseForwardsFlag) > 0 {
+			fmt.Fprintln(os.Stderr, "-s cannot be combined with -forward-agent or -R")
+			return -1
+		}
 	}
 
 	if *fileTransfer {
@@ -869,7 +947,7 @@ func ClientMain() int {
 
 	var sshConfig *matchcfg.Resolver
 	var configBytes []byte
-	configPath := path.Join(homedir(), ".ssh", "config")
+	configPath := resolveConfigPath(*configFileFlag)
 	configBytes, err = os.ReadFile(configPath)
 	if err == nil {
 		sshConfig, err = matchcfg.New(configPath, configBytes)
@@ -1004,15 +1082,35 @@ func ClientMain() int {
 	// over the ~/.ssh/config keyword; the default "ask" keeps the historical
 	// interactive TOFU behaviour
 	var strictConfigValue string
+	var verifyHostKeyDNSConfigValue string
 	if strictSshConfig, err := sshConfig.ConfigForHost(parsedUrl.Hostname(), options.Username()); err == nil && strictSshConfig != nil {
 		if v, err := strictSshConfig.Get(parsedUrl.Hostname(), "StrictHostKeyChecking"); err == nil {
 			strictConfigValue = v
+		}
+		if v, err := strictSshConfig.Get(parsedUrl.Hostname(), "VerifyHostKeyDNS"); err == nil {
+			verifyHostKeyDNSConfigValue = v
 		}
 	}
 	strictHostKeyChecking, err := ssh3.ResolveStrictHostKeyChecking(strictFlagSet, *strictHostKeyCheckingFlag, strictOptionValue, strictConfigValue)
 	if err != nil {
 		log.Error().Msgf("could not resolve StrictHostKeyChecking: %s", err)
 		return -1
+	}
+
+	// VerifyHostKeyDNS resolution: -o wins over the ssh config keyword, and
+	// the default "no" keeps the historical silent behaviour (an explicit
+	// "no" in -o must still override a "yes" coming from the config file).
+	verifyHostKeyDNSValue := verifyHostKeyDNSConfigValue
+	if verifyHostKeyDNSOptionSet {
+		verifyHostKeyDNSValue = verifyHostKeyDNSOptionValue
+	}
+	verifyHostKeyDNS, err := parseVerifyHostKeyDNSValue(verifyHostKeyDNSValue)
+	if err != nil {
+		log.Error().Msgf("could not resolve VerifyHostKeyDNS: %s", err)
+		return -1
+	}
+	if verifyHostKeyDNS.Mode != ssh3.VerifyHostKeyDNSNo {
+		log.Debug().Msgf("VerifyHostKeyDNS=%s", describeVerifyHostKeyDNS(verifyHostKeyDNS))
 	}
 	if (*controlMaster == "yes" || *controlMaster == "auto") && *proxyJump != "" {
 		log.Error().Msgf("-control-master is not compatible with -proxy-jump (from the command line or ~/.ssh/config)")
@@ -1025,17 +1123,9 @@ func ClientMain() int {
 		controlPath = path.Join(ssh3Dir, fmt.Sprintf("cm-%s@%s:%d", options.Username(), options.Hostname(), options.Port()))
 	}
 	if *controlOp != "" {
-		if *controlOp != "exit" {
-			log.Error().Msgf("unsupported control operation %q, only \"exit\"", *controlOp)
-			return -1
-		}
 		opCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := client.ExitMaster(opCtx, controlPath); err != nil {
-			log.Error().Msgf("control operation failed: %s", err)
-			return -1
-		}
-		return 0
+		return runControlOp(opCtx, controlPath, *controlOp)
 	}
 	if *controlMaster == "yes" || *controlMaster == "auto" {
 		if runtime.GOOS == "windows" {
@@ -1044,7 +1134,7 @@ func ClientMain() int {
 			// this process is the detached master: connect and serve the
 			// control socket; it never runs sessions itself
 			idleTimeout, _ := parseControlPersist(*controlPersist)
-			qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, strictHostKeyChecking, oidcConfig, options, nil, nil, tuning)
+			qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, strictHostKeyChecking, verifyHostKeyDNS, oidcConfig, options, nil, nil, tuning)
 			if qconn == nil {
 				return status
 			}
@@ -1104,7 +1194,7 @@ func ClientMain() int {
 			log.Error().Msgf("Could not get connection material for proxy %s: %s", proxyParsedUrl, err)
 			return -1
 		}
-		qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, strictHostKeyChecking, oidcConfig, proxyOptions, nil, tty, tuning)
+		qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, strictHostKeyChecking, verifyHostKeyDNS, oidcConfig, proxyOptions, nil, tty, tuning)
 
 		if qconn == nil {
 			if status != 0 {
@@ -1143,7 +1233,7 @@ func ClientMain() int {
 		log.Debug().Msgf("started proxy jump at %s", proxyAddress)
 	}
 
-	qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, strictHostKeyChecking, oidcConfig, options, proxyAddress, tty, tuning)
+	qconn, status := setupQUICConnection(ctx, *insecure, keyLog, ssh3Dir, pool, knownHostsPath, knownHosts, strictHostKeyChecking, verifyHostKeyDNS, oidcConfig, options, proxyAddress, tty, tuning)
 
 	if qconn == nil {
 		if status != 0 {
@@ -1189,13 +1279,52 @@ func ClientMain() int {
 		}
 	}
 
+	// -D: open the local SOCKS5 listener over the connection just established.
+	// It only needs the SSH3 conversation, so it is set up before any session
+	// channel and stays usable for the whole lifetime of the invocation.
+	var forwarder *dynamicForwarder
+	if *dynamicForward != "" {
+		forwarder, err = startDynamicForward(ctx, c.Conversation, dynamicForwardSpecValue)
+		if err != nil {
+			log.Error().Msgf("could not set up dynamic forwarding: %s", err)
+			return -1
+		}
+		defer func() {
+			forwarder.Close()
+			forwarder.Wait()
+		}()
+		if boundPort := dynamicForwardSpecValue.BindPort; boundPort == 0 {
+			log.Info().Msgf("dynamic SOCKS proxy listening on %s (allocated port)", forwarder.ListenAddr())
+		} else {
+			log.Info().Msgf("dynamic SOCKS proxy listening on %s", forwarder.ListenAddr())
+		}
+	}
+
 	if *fileTransfer {
 		return runFileTransfer(c, fileTransferTarget, fileTransferLocal, fileTransferUpload, *recursive, *resumeMode, *verifyChecksum)
 	}
 
+	// -s requests a subsystem instead of a shell or a command: it owns the
+	// session channel, so it is dispatched before the shell/exec path and is
+	// mutually exclusive with it.
+	if subsystemName != "" {
+		if *noSession {
+			fmt.Fprintln(os.Stderr, "-s cannot be combined with -N")
+			return -1
+		}
+		if subsystemName == sftpSubsystemName {
+			return runSFTPSubsystem(c.Conversation)
+		}
+		if err := runSubsystemSession(ctx, c, tty, subsystemName, *forcePTY); err != nil {
+			log.Error().Msgf("an error was encountered when running the %s subsystem: %s", subsystemName, err)
+			return -1
+		}
+		return 0
+	}
+
 	if *noSession {
 		log.Info().Msgf("-N: holding the connection open for the forwards until interrupted")
-		if len(reverseForwardsFlag) > 0 {
+		if len(reverseForwardsFlag) > 0 || forwarder != nil {
 			// no session channel to start the dispatch loop implicitly
 			c.StartAcceptLoop()
 		}
@@ -1205,6 +1334,24 @@ func ClientMain() int {
 		log.Debug().Msgf("interrupted: closing the connection")
 		c.Close()
 		return 0
+	}
+
+	// -t forces a PTY even when the local input is not a terminal, which the
+	// regular session path cannot do: RunSession only allocates one when it
+	// finds a TTY.
+	if *forcePTY {
+		err = runForcedPtySession(ctx, c, tty, *forwardSSHAgent, command...)
+		switch sessionError := err.(type) {
+		case client.ExitStatus:
+			log.Info().Msgf("the process exited with status %d", sessionError.StatusCode)
+			return sessionError.StatusCode
+		case client.ExitSignal:
+			log.Error().Msgf("the process exited with signal %s: %s", sessionError.Signal, sessionError.ErrorMessageUTF8)
+			return -1
+		default:
+			log.Error().Msgf("an error was encountered when running the session: %s", sessionError)
+			return -1
+		}
 	}
 
 	err = c.RunSession(tty, *forwardSSHAgent, command...)

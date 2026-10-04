@@ -23,6 +23,29 @@ import (
 // cmDaemonEnv marks a re-executed process as the detached control master.
 const cmDaemonEnv = "SSH3_CM_DAEMON"
 
+// controlOpTimeout bounds one `-O <op>` operation. check returns as soon as
+// the master answers; stop additionally waits for the socket to be released,
+// so the deadline also caps that wait instead of hanging on a stuck master.
+const controlOpTimeout = 5 * time.Second
+
+// runControlOp executes one `ssh -O <op>` operation against the master
+// listening on controlPath and returns the process exit status: 0 on success,
+// -1 (process exit code 255) on any failure, with the reason logged. A check
+// also prints the master status line on stdout, so scripts can read the pid.
+func runControlOp(ctx context.Context, controlPath, op string) int {
+	opCtx, cancel := context.WithTimeout(ctx, controlOpTimeout)
+	defer cancel()
+	status, err := client.RunControlOp(opCtx, controlPath, op)
+	if err != nil {
+		log.Error().Msgf("control operation %q failed: %s", op, err)
+		return -1
+	}
+	if op == client.ControlOpCheck {
+		fmt.Fprintln(os.Stdout, status.String())
+	}
+	return 0
+}
+
 // parseControlPersist maps -control-persist to an idle timeout: "no" gives
 // (0, false) meaning no master at all, "yes" gives (0, true) meaning
 // persist forever, a number of seconds gives that idle timeout.

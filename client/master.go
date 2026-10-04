@@ -7,6 +7,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -79,22 +80,64 @@ type cmSession struct {
 	started bool
 }
 
+// masterState is the mutable state of one serving master: the control
+// listener, the bridged sessions and the bookkeeping a control op reports.
+type masterState struct {
+	ln      net.Listener
+	path    string
+	started time.Time
+
+	mu           sync.Mutex
+	sessions     map[cm.Token]*cmSession
+	lastActivity atomic.Int64
+	forwards     atomic.Int64
+	closing      atomic.Bool
+}
+
+// sessionCount returns the number of bridged sessions currently registered.
+func (st *masterState) sessionCount() int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return len(st.sessions)
+}
+
+// status is the snapshot a check op reports.
+func (st *masterState) status() MasterStatus {
+	return MasterStatus{
+		Path:     st.path,
+		PID:      os.Getpid(),
+		Protocol: cm.Version,
+		Uptime:   time.Since(st.started).Seconds(),
+		Sessions: st.sessionCount(),
+		Forwards: int(st.forwards.Load()),
+	}
+}
+
+// shutdown stops accepting control connections: ServeControlMaster leaves its
+// accept loop and removes the socket file on the way out. Idempotent, so the
+// exit op, the idle timeout and a cancelled context may all request it.
+func (st *masterState) shutdown() {
+	if st.closing.CompareAndSwap(false, true) {
+		st.ln.Close()
+	}
+}
+
 // ServeControlMaster serves the control channel on ln until ctx is done, a
-// slave sends EXIT, or (with MasterOptions.IdleTimeout) the master idles out
-// with no running sessions. The connection must be an authenticated Client;
-// every slave session then runs as a channel on this connection. On return
-// the socket file is removed (clean teardown). Already-running bridges are
-// not interrupted by EXIT; closing the underlying Client (typically via the
-// caller's ctx) ends them.
+// slave sends EXIT or STOP, or (with MasterOptions.IdleTimeout) the master
+// idles out with no running sessions. The connection must be an authenticated
+// Client; every slave session then runs as a channel on this connection. On
+// return the socket file is removed (clean teardown). Already-running bridges
+// are not interrupted by a shutdown op; closing the underlying Client
+// (typically via the caller's ctx) ends them.
 func ServeControlMaster(ctx context.Context, c *Client, ln net.Listener, opts *MasterOptions) error {
 	if opts == nil {
 		opts = &MasterOptions{}
 	}
-	var mu sync.Mutex
-	sessions := make(map[cm.Token]*cmSession)
-
-	var lastActivity atomic.Int64
-	lastActivity.Store(time.Now().UnixNano())
+	st := &masterState{ln: ln, started: time.Now(), sessions: make(map[cm.Token]*cmSession)}
+	if addr, ok := ln.Addr().(*net.UnixAddr); ok {
+		st.path = addr.Name
+	}
+	st.lastActivity.Store(time.Now().UnixNano())
 
 	if opts.IdleTimeout > 0 {
 		tick := opts.IdleTimeout / 4
@@ -112,13 +155,10 @@ func ServeControlMaster(ctx context.Context, c *Client, ln net.Listener, opts *M
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					mu.Lock()
-					running := len(sessions)
-					mu.Unlock()
-					idle := time.Since(time.Unix(0, lastActivity.Load()))
-					if running == 0 && idle >= opts.IdleTimeout {
+					idle := time.Since(time.Unix(0, st.lastActivity.Load()))
+					if st.sessionCount() == 0 && idle >= opts.IdleTimeout {
 						log.Debug().Msgf("master: idle for %v, closing control socket", idle.Truncate(time.Millisecond))
-						ln.Close()
+						st.shutdown()
 						return
 					}
 				}
@@ -128,11 +168,11 @@ func ServeControlMaster(ctx context.Context, c *Client, ln net.Listener, opts *M
 
 	go func() {
 		<-ctx.Done()
-		ln.Close()
+		st.shutdown()
 	}()
 
 	defer func() {
-		ln.Close()
+		st.ln.Close()
 		if addr, ok := ln.Addr().(*net.UnixAddr); ok && addr.Name != "" {
 			os.Remove(addr.Name) // clean teardown: no stale socket file
 		}
@@ -141,15 +181,12 @@ func ServeControlMaster(ctx context.Context, c *Client, ln net.Listener, opts *M
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			select {
-			case <-ctx.Done():
-				return nil
-			default:
-				return nil // EXIT and idle timeout are orderly shutdowns too
-			}
+			// every shutdown path (ctx, exit/stop op, idle timeout) closes
+			// the listener: Accept failing is an orderly end, not a failure
+			return nil
 		}
-		lastActivity.Store(time.Now().UnixNano())
-		go handleMasterConn(ctx, c, conn, sessions, &mu, ln, &lastActivity)
+		st.lastActivity.Store(time.Now().UnixNano())
+		go handleMasterConn(ctx, c, conn, st)
 	}
 }
 
@@ -160,9 +197,7 @@ func masterSendError(conn net.Conn, msg string) {
 // handleMasterConn drives one control or stream attachment connection.
 // Connections whose ownership moves to a session bridge (attach conns, and
 // the control conn of a started session) are closed by the bridge, not here.
-func handleMasterConn(ctx context.Context, c *Client, conn net.Conn,
-	sessions map[cm.Token]*cmSession, mu *sync.Mutex, ln net.Listener,
-	lastActivity *atomic.Int64) {
+func handleMasterConn(ctx context.Context, c *Client, conn net.Conn, st *masterState) {
 
 	moved := false
 	defer func() {
@@ -188,9 +223,13 @@ func handleMasterConn(ctx context.Context, c *Client, conn net.Conn,
 		if err != nil {
 			return
 		}
-		lastActivity.Store(time.Now().UnixNano())
+		st.lastActivity.Store(time.Now().UnixNano())
 		switch typ {
 		case cm.MsgOpenSession:
+			if st.closing.Load() {
+				masterSendError(conn, "the control master is shutting down")
+				continue
+			}
 			var req cm.OpenSession
 			if err := req.Decode(payload); err != nil {
 				masterSendError(conn, fmt.Sprintf("malformed OPEN_SESSION: %v", err))
@@ -202,9 +241,9 @@ func handleMasterConn(ctx context.Context, c *Client, conn net.Conn,
 				continue
 			}
 			sess.control = conn
-			mu.Lock()
-			sessions[sess.token] = sess
-			mu.Unlock()
+			st.mu.Lock()
+			st.sessions[sess.token] = sess
+			st.mu.Unlock()
 			if err := cm.WriteFrame(conn, cm.MsgOK, sess.token[:]); err != nil {
 				return
 			}
@@ -216,9 +255,9 @@ func handleMasterConn(ctx context.Context, c *Client, conn net.Conn,
 				masterSendError(conn, fmt.Sprintf("malformed ATTACH: %v", err))
 				return
 			}
-			mu.Lock()
-			sess := sessions[att.Token]
-			mu.Unlock()
+			st.mu.Lock()
+			sess := st.sessions[att.Token]
+			st.mu.Unlock()
 			if sess == nil {
 				masterSendError(conn, "unknown session token")
 				return
@@ -258,7 +297,7 @@ func handleMasterConn(ctx context.Context, c *Client, conn net.Conn,
 				}
 				moved = true
 				log.Debug().Msgf("master: attached io stream for session %.8x, starting bridge", att.Token)
-				go runMasterBridge(sess, conn, errConn, sessions, mu)
+				go runMasterBridge(sess, conn, errConn, st)
 				return // the control conn also belongs to the bridge now
 
 			default:
@@ -277,15 +316,48 @@ func handleMasterConn(ctx context.Context, c *Client, conn net.Conn,
 				masterSendError(conn, err.Error())
 				continue
 			}
+			st.forwards.Add(1)
 			if err := cm.WriteFrame(conn, cm.MsgOK, []byte(bound)); err != nil {
 				return
 			}
 			log.Debug().Msgf("master: forwarding %v from %s to %s (bound %s)", typ, fwd.ListenAddr, fwd.TargetAddr, bound)
 
+		case msgControlOp:
+			op, err := decodeControlOp(payload)
+			if err != nil {
+				masterSendError(conn, fmt.Sprintf("malformed control operation: %v", err))
+				continue
+			}
+			switch op {
+			case ControlOpCheck:
+				status, err := json.Marshal(st.status())
+				if err != nil {
+					masterSendError(conn, err.Error())
+					continue
+				}
+				if err := cm.WriteFrame(conn, cm.MsgOK, status); err != nil {
+					return
+				}
+				log.Debug().Msgf("master: check op answered (pid=%d)", os.Getpid())
+
+			case ControlOpStop, ControlOpExit:
+				if err := cm.WriteFrame(conn, cm.MsgOK, nil); err != nil {
+					return
+				}
+				log.Debug().Msgf("master: %s requested, closing control socket", op)
+				st.shutdown()
+				return
+
+			default:
+				// refuse but keep the connection: the caller may retry with
+				// an operation this master does know
+				masterSendError(conn, fmt.Sprintf("unknown control operation %q", op))
+			}
+
 		case cm.MsgExit:
 			if err := cm.WriteFrame(conn, cm.MsgOK, nil); err == nil {
 				log.Debug().Msgf("master: shutdown requested, closing control socket")
-				ln.Close()
+				st.shutdown()
 			}
 			return
 
@@ -418,16 +490,15 @@ func relaySlaveInteractions(control net.Conn, channel ssh3.Channel) {
 // upstream and session stdout downstream, the stderr attachment carries the
 // session's stderr. When the channel ends, the exit status goes back on the
 // control connection.
-func runMasterBridge(sess *cmSession, ioConn, errConn net.Conn,
-	sessions map[cm.Token]*cmSession, mu *sync.Mutex) {
+func runMasterBridge(sess *cmSession, ioConn, errConn net.Conn, st *masterState) {
 
 	defer func() {
 		ioConn.Close()
 		errConn.Close()
 		sess.control.Close()
-		mu.Lock()
-		delete(sessions, sess.token)
-		mu.Unlock()
+		st.mu.Lock()
+		delete(st.sessions, sess.token)
+		st.mu.Unlock()
 	}()
 
 	// slave interaction frames (window changes, signals) arrive on the
