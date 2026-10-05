@@ -44,6 +44,7 @@ import (
 	ssh3Messages "github.com/francoismichel/ssh3/message"
 	"github.com/francoismichel/ssh3/server_auth"
 	util "github.com/francoismichel/ssh3/util"
+	"github.com/francoismichel/ssh3/util/ttymodes"
 	"github.com/francoismichel/ssh3/util/unix_util"
 )
 
@@ -436,6 +437,24 @@ func execCmdInBackground(channel ssh3.Channel, user *unix_util.User, session *ru
 				execExitStatus = uint64(0)
 				if waitErr != nil {
 					if exitError, ok := waitErr.(*exec.ExitError); ok {
+						if signalName, coreDumped, signaled := signalExit(exitError); signaled {
+							// OpenSSH parity: a signal death reports the
+							// RFC 4254 section 6.10 exit-signal request
+							// instead of a 255 exit status
+							log.Debug().Msgf("sending exit-signal %s on channel %d", signalName, channel.ChannelID())
+							err := channel.SendRequest(&ssh3Messages.ChannelRequestMessage{
+								WantReply: false,
+								ChannelRequest: &ssh3Messages.ExitSignalRequest{
+									SignalNameWithoutSig: signalName,
+									CoreDumped:           coreDumped,
+								},
+							})
+							if err != nil {
+								log.Error().Msgf("Could not send exit signal message to the peer: %s", err)
+							}
+							// both channels are closed, nothing else to do, return
+							return
+						}
 						execExitStatus = safeExitStatus(exitError.ExitCode())
 					}
 				}
@@ -453,6 +472,24 @@ func execCmdInBackground(channel ssh3.Channel, user *unix_util.User, session *ru
 		}
 	}()
 	return nil
+}
+
+// signalExit reports how a command's process state ended: a signal death
+// comes back with the wire signal name (no SIG prefix, like the exit-signal
+// request carries) and the core-dump flag; a normal exit is not signaled.
+func signalExit(exitError *exec.ExitError) (signalName string, coreDumped bool, signaled bool) {
+	ws, ok := exitError.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok || !ws.Signaled() {
+		return "", false, false
+	}
+
+	for name, signal := range signals {
+		if signal == ws.Signal() {
+			return strings.TrimPrefix(name, "SIG"), ws.CoreDump(), true
+		}
+	}
+
+	return "", false, false
 }
 
 func newPtyReq(user *unix_util.User, channel ssh3.Channel, request ssh3Messages.PtyRequest, wantReply bool) error {
@@ -476,6 +513,17 @@ func newPtyReq(user *unix_util.User, channel ssh3.Channel, request ssh3Messages.
 	}
 
 	setWinsize(pty, request.CharWidth, request.CharHeight, request.PixelWidth, request.PixelHeight)
+
+	// the terminal modes ride the pty request (RFC 4254 section 8); a
+	// payload we cannot parse or apply must not kill the session
+	if len(request.EncodedTerminalModes) > 0 {
+		modes, err := ttymodes.Parse([]byte(request.EncodedTerminalModes))
+		if err != nil {
+			log.Warn().Msgf("ignoring the pty terminal modes: %s", err)
+		} else if err := ttymodes.ApplyToFile(tty, modes); err != nil {
+			log.Warn().Msgf("could not apply the pty terminal modes: %s", err)
+		}
+	}
 
 	session.pty = &openPty{
 		pty:     pty,
@@ -896,6 +944,9 @@ func ServerMain() int {
 	// semantics; the env default lets systemd installs opt into wide binds
 	// without editing the unit's ExecStart.
 	gatewayPorts := os.Getenv("SSH3_GATEWAY_PORTS")
+	if gatewayPorts == "" {
+		gatewayPorts = gatewayPortsNo
+	}
 	flag.StringVar(&gatewayPorts, "gateway-ports", gatewayPorts, "GatewayPorts policy for reverse (-R) forwarding: no (force loopback, default), clientspecified or yes; SSH3_GATEWAY_PORTS sets it too")
 	maxReverseForwards := 10
 	if envMax, err := strconv.Atoi(os.Getenv("SSH3_MAX_REVERSE_FORWARDS")); err == nil {

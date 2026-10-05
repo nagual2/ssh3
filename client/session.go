@@ -29,13 +29,15 @@ type SessionSpec struct {
 	ForwardAgent bool
 }
 
-// PtySpec is the payload of a remote pty request.
+// PtySpec is the payload of a remote pty request. Modes carries the
+// EncodedTerminalModes payload (RFC 4254 section 8); empty sends none.
 type PtySpec struct {
 	Term        string
 	Columns     uint64
 	Rows        uint64
 	PixelWidth  uint64
 	PixelHeight uint64
+	Modes       string
 }
 
 // OpenSession opens a session channel and issues the pty/shell/exec requests
@@ -72,11 +74,12 @@ func (c *Client) OpenSession(_ context.Context, spec SessionSpec) (ssh3.Channel,
 			&ssh3Messages.ChannelRequestMessage{
 				WantReply: true,
 				ChannelRequest: &ssh3Messages.PtyRequest{
-					Term:        spec.Pty.Term,
-					CharWidth:   spec.Pty.Columns,
-					CharHeight:  spec.Pty.Rows,
-					PixelWidth:  spec.Pty.PixelWidth,
-					PixelHeight: spec.Pty.PixelHeight,
+					Term:                 spec.Pty.Term,
+					CharWidth:            spec.Pty.Columns,
+					CharHeight:           spec.Pty.Rows,
+					PixelWidth:           spec.Pty.PixelWidth,
+					PixelHeight:          spec.Pty.PixelHeight,
+					EncodedTerminalModes: spec.Pty.Modes,
 				},
 			},
 		)

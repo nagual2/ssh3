@@ -10,11 +10,13 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sys/windows"
 
 	"github.com/francoismichel/ssh3"
+	"github.com/francoismichel/ssh3/client/winsize"
 	ssh3Messages "github.com/francoismichel/ssh3/message"
 )
 
@@ -77,9 +79,23 @@ var forwardedSignals = map[syscall.Signal]string{
 	syscall.SIGTERM: "TERM",
 }
 
+// forwardWindowChanges propagates the console resizes of an interactive
+// session: no resize signal exists on Windows and draining console input
+// events would steal keystrokes from the stdin pump, so the geometry is
+// polled and a window-change request rides out on a change.
 func forwardWindowChanges(ctx context.Context, channel ssh3.Channel, tty *os.File) {
-	// no resize signal to listen for: unwind on cancellation only
-	<-ctx.Done()
+	const resizePollInterval = 500 * time.Millisecond
+
+	if _, err := winsize.GetWinsize(tty); err != nil {
+		return
+	}
+
+	err := winsize.PollChanges(ctx, tty, resizePollInterval, func() error {
+		return sendWindowChangeRequest(channel, tty)
+	})
+	if err != nil {
+		log.Warn().Msgf("could not send window change request: %s", err)
+	}
 }
 
 func forwardSessionSignals(ctx context.Context, channel ssh3.Channel) {

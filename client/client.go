@@ -32,6 +32,7 @@ import (
 	"github.com/francoismichel/ssh3/internal"
 	ssh3Messages "github.com/francoismichel/ssh3/message"
 	"github.com/francoismichel/ssh3/util"
+	"github.com/francoismichel/ssh3/util/ttymodes"
 )
 
 type ExitStatus struct {
@@ -534,44 +535,55 @@ func (c *Client) ForwardTCP(ctx context.Context, localTCPAddr *net.TCPAddr, remo
 	return conn.Addr().(*net.TCPAddr), nil
 }
 
-func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...string) error {
+func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, requestTTY string, command ...string) error {
 
 	ctx := c.Context()
 
 	// console inspection comes first: the pty request mirrors the local
-	// terminal, and raw-mode/signal forwarding below needs isATTY/hasWinSize
+	// terminal, and raw-mode/signal forwarding below needs isATTY/hasWinSize.
+	// The pty gate follows the RequestTTY policy (OpenSSH ssh_config
+	// semantics): auto (the default) requests one for interactive shells over
+	// a TTY, yes whenever the local side has a TTY, no never, and force —
+	// when the local side has no TTY — is served by the forced-pty path
+	// before RunSession and behaves like yes here.
 	spec := SessionSpec{Command: command, ForwardAgent: forwardSSHAgent}
-	isATTY, hasWinSize := false, false
+	interactive := len(command) == 0
+	isATTY := term.IsTerminal(int(tty.Fd()))
+	hasWinSize := false
 	// A PTY session is interactive: its stdin never "finishes" while the user
 	// keeps the session open, so an exit status arriving with input still
 	// pending is the normal end of the session, not a truncated pipe transfer.
-	if len(command) == 0 {
-		isATTY = term.IsTerminal(int(tty.Fd()))
-
+	var wantPty bool
+	switch requestTTY {
+	case "no":
+		wantPty = false
+	case "yes", "force":
+		wantPty = true
+	default: // auto
+		wantPty = interactive && isATTY
+	}
+	if wantPty {
 		windowSize, err := winsize.GetWinsize(tty)
 		hasWinSize = err == nil
-		if isATTY && !hasWinSize {
-			// some Windows consoles do not expose a queryable size via stdin:
-			// a PTY with a default geometry still beats a raw-pipe session
+		if !hasWinSize {
+			// some consoles do not expose a queryable size via stdin: a PTY
+			// with a default geometry still beats a raw-pipe session
 			log.Warn().Msgf("could not get window size: %+v, using 80x24", err)
 			windowSize.NCols = 80
 			windowSize.NRows = 24
-		} else if !hasWinSize {
-			log.Warn().Msgf("could not get window size: %+v", err)
 		}
-		if isATTY {
-			termType := os.Getenv("TERM")
-			if termType == "" {
-				// remote ncurses programs expect a terminal type to be set
-				termType = "xterm"
-			}
-			spec.Pty = &PtySpec{
-				Term:        termType,
-				Columns:     uint64(windowSize.NCols),
-				Rows:        uint64(windowSize.NRows),
-				PixelWidth:  uint64(windowSize.PixelWidth),
-				PixelHeight: uint64(windowSize.PixelHeight),
-			}
+		termType := os.Getenv("TERM")
+		if termType == "" {
+			// remote ncurses programs expect a terminal type to be set
+			termType = "xterm"
+		}
+		spec.Pty = &PtySpec{
+			Term:        termType,
+			Columns:     uint64(windowSize.NCols),
+			Rows:        uint64(windowSize.NRows),
+			PixelWidth:  uint64(windowSize.PixelWidth),
+			PixelHeight: uint64(windowSize.PixelHeight),
+			Modes:       ttymodes.LocalTermiosModes(tty),
 		}
 	}
 
@@ -584,10 +596,10 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, command ...strin
 		return err
 	}
 
-	// avoid making the terminal raw if stdin is not a TTY
-	// similar behaviour to OpenSSH; the pty/shell requests are already on
-	// the wire at this point
-	if len(command) == 0 && isATTY {
+	// avoid making the terminal raw if the session carries no pty or stdin
+	// is not a TTY; similar behaviour to OpenSSH: the pty/shell requests are
+	// already on the wire at this point
+	if ptyRequested && isATTY {
 		fd := os.Stdin.Fd()
 		oldState, err := term.MakeRaw(int(fd))
 		if err != nil {

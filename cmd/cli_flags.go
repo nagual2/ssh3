@@ -232,3 +232,21 @@ func (s verifyHostKeyDNSSetting) AllowsAlgorithm(algorithm *uint8) bool {
 	}
 	return false
 }
+
+// parseRequestTTY validates the RequestTTY policy (-o RequestTTY=... and the
+// ~/.ssh/config keyword) and returns its canonical lower-case form: auto
+// (the default), no, yes or force, with the OpenSSH ssh_config semantics.
+func parseRequestTTY(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "auto":
+		return "auto", nil
+	case "no":
+		return "no", nil
+	case "yes":
+		return "yes", nil
+	case "force":
+		return "force", nil
+	default:
+		return "", fmt.Errorf("invalid RequestTTY policy %q: want auto, no, yes or force", value)
+	}
+}

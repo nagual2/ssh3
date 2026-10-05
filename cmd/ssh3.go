@@ -588,6 +588,7 @@ func ClientMain() int {
 	configFileFlag := flag.String("F", "", "specifies an alternative per-user configuration file (default ~/.ssh/config)")
 	dynamicForward := flag.String("D", "", "dynamic (SOCKS5) port forwarding: [bind_address:]port (an empty or \"*\" bind address listens on every interface, no address means localhost)")
 	forcePTY := flag.Bool("t", false, "force pseudo-terminal allocation, even when the local standard input is not a terminal")
+	noPTY := flag.Bool("T", false, "disable pseudo-terminal allocation, even for an interactive session (RequestTTY=no)")
 	subsystem := flag.String("s", "", "request a remote subsystem: \"sftp\" opens the interactive SFTP client, any other name requests that subsystem")
 
 	var flagValues []*FlagValue
@@ -733,6 +734,7 @@ func ClientMain() int {
 	strictOptionValue := ""
 	verifyHostKeyDNSOptionValue := ""
 	verifyHostKeyDNSOptionSet := false
+	requestTTYOption := "" // the -o RequestTTY=... value, empty when unset
 	parsersByKeyword := make(map[string]client_config.OptionName)
 	for optionName, parser := range cliParsers {
 		keyword := strings.ToLower(parser.OptionConfigName())
@@ -749,6 +751,17 @@ func ClientMain() int {
 				return -1
 			}
 			strictOptionValue = strings.TrimSpace(value)
+			continue
+		}
+		if strings.EqualFold(key, "RequestTTY") {
+			// validated here so a bad -o value is rejected like every other
+			// malformed option, before the connection is set up
+			policy, err := parseRequestTTY(value)
+			if err != nil {
+				log.Error().Msgf("%s", err)
+				return -1
+			}
+			requestTTYOption = policy
 			continue
 		}
 		if strings.EqualFold(key, "VerifyHostKeyDNS") {
@@ -1057,6 +1070,7 @@ func ClientMain() int {
 	// honored as an alias of the fork's UDPProxyJump (the jump host must run
 	// ssh3-server). Include directives are resolved by the config library.
 	tuning.KeepAlivePeriod = time.Second
+	requestTTYConfig := "" // the ~/.ssh/config RequestTTY value, empty when unset
 	if sshConfig != nil {
 		hostname := parsedUrl.Hostname()
 		if v, err := sshConfig.Get(hostname, "ServerAliveInterval"); err == nil && v != "" {
@@ -1067,6 +1081,14 @@ func ClientMain() int {
 		}
 		if v, err := sshConfig.Get(hostname, "ForwardAgent"); err == nil && strings.EqualFold(v, "yes") {
 			*forwardSSHAgent = true
+		}
+		if v, err := sshConfig.Get(hostname, "RequestTTY"); err == nil && v != "" {
+			policy, policyErr := parseRequestTTY(v)
+			if policyErr != nil {
+				log.Error().Msgf("%s", policyErr)
+				return -1
+			}
+			requestTTYConfig = policy
 		}
 		if *proxyJump == "" {
 			if v, err := sshConfig.Get(hostname, "UDPProxyJump"); err == nil && v != "" {
@@ -1304,6 +1326,27 @@ func ClientMain() int {
 		return runFileTransfer(c, fileTransferTarget, fileTransferLocal, fileTransferUpload, *recursive, *resumeMode, *verifyChecksum)
 	}
 
+	// RequestTTY resolution (OpenSSH precedence): the -T/-t flags are the
+	// CLI absolutes, the -o option overrides the ~/.ssh/config keyword, auto
+	// is the default
+	requestTYTPolicy := "auto"
+	if requestTTYConfig != "" {
+		requestTYTPolicy = requestTTYConfig
+	}
+	if requestTTYOption != "" {
+		requestTYTPolicy = requestTTYOption
+	}
+	if *noPTY {
+		requestTYTPolicy = "no"
+	}
+	if *forcePTY {
+		if *noPTY {
+			fmt.Fprintln(os.Stderr, "-t and -T are mutually exclusive")
+			return -1
+		}
+		requestTYTPolicy = "force"
+	}
+
 	// -s requests a subsystem instead of a shell or a command: it owns the
 	// session channel, so it is dispatched before the shell/exec path and is
 	// mutually exclusive with it.
@@ -1315,7 +1358,7 @@ func ClientMain() int {
 		if subsystemName == sftpSubsystemName {
 			return runSFTPSubsystem(c.Conversation)
 		}
-		if err := runSubsystemSession(ctx, c, tty, subsystemName, *forcePTY); err != nil {
+		if err := runSubsystemSession(ctx, c, tty, subsystemName, requestTYTPolicy == "force"); err != nil {
 			log.Error().Msgf("an error was encountered when running the %s subsystem: %s", subsystemName, err)
 			return -1
 		}
@@ -1339,7 +1382,7 @@ func ClientMain() int {
 	// -t forces a PTY even when the local input is not a terminal, which the
 	// regular session path cannot do: RunSession only allocates one when it
 	// finds a TTY.
-	if *forcePTY {
+	if *forcePTY || requestTYTPolicy == "force" {
 		err = runForcedPtySession(ctx, c, tty, *forwardSSHAgent, command...)
 		switch sessionError := err.(type) {
 		case client.ExitStatus:
@@ -1347,21 +1390,21 @@ func ClientMain() int {
 			return sessionError.StatusCode
 		case client.ExitSignal:
 			log.Error().Msgf("the process exited with signal %s: %s", sessionError.Signal, sessionError.ErrorMessageUTF8)
-			return -1
+			return exitCodeForExitSignal(sessionError.Signal)
 		default:
 			log.Error().Msgf("an error was encountered when running the session: %s", sessionError)
 			return -1
 		}
 	}
 
-	err = c.RunSession(tty, *forwardSSHAgent, command...)
+	err = c.RunSession(tty, *forwardSSHAgent, requestTYTPolicy, command...)
 	switch sessionError := err.(type) {
 	case client.ExitStatus:
 		log.Info().Msgf("the process exited with status %d", sessionError.StatusCode)
 		return sessionError.StatusCode
 	case client.ExitSignal:
 		log.Error().Msgf("the process exited with signal %s: %s", sessionError.Signal, sessionError.ErrorMessageUTF8)
-		return -1
+		return exitCodeForExitSignal(sessionError.Signal)
 	default:
 		log.Error().Msgf("an error was encountered when running the session: %s", sessionError)
 		return -1

@@ -23,6 +23,7 @@ import (
 	"github.com/francoismichel/ssh3/client"
 	"github.com/francoismichel/ssh3/client/winsize"
 	ssh3Messages "github.com/francoismichel/ssh3/message"
+	"github.com/francoismichel/ssh3/util/ttymodes"
 )
 
 const (
@@ -75,6 +76,7 @@ func newForcedPtySpec(tty *os.File) (*client.PtySpec, error) {
 		Rows:        uint64(rows),
 		PixelWidth:  pixelWidth,
 		PixelHeight: pixelHeight,
+		Modes:       ttymodes.LocalTermiosModes(tty),
 	}, nil
 }
 
