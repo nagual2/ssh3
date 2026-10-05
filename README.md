@@ -53,6 +53,8 @@ The release package is configured through the systemd `EnvironmentFile` at `/etc
 | --- | --- | --- |
 | `SSH3_LOG_FILE` | `/var/log/ssh3.log` | Server log file |
 | `SSH3_LOG_LEVEL` | `info` | Log verbosity (`trace`, `debug`, `info`, `warn`, `error`) |
+| `SSH3_GATEWAY_PORTS` | `no` | GatewayPorts policy for reverse (-R) forwarding: `no` forces client-requested non-loopback binds back to the loopback, `clientspecified` honors the requested bind address, `yes` binds the wildcard |
+| `SSH3_MAX_REVERSE_FORWARDS` | `10` | Maximum active reverse (-R) listeners per user |
 | `LANG` | `C.UTF-8` | Locale forwarded to user shells |
 
 Apply changes with `sudo systemctl restart ssh3-server`.

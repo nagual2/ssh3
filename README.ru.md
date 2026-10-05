@@ -53,6 +53,8 @@ sudo dpkg -i ssh3_0.1.22_amd64.deb
 | --- | --- | --- |
 | `SSH3_LOG_FILE` | `/var/log/ssh3.log` | Файл журнала сервера |
 | `SSH3_LOG_LEVEL` | `info` | Уровень логирования (`trace`, `debug`, `info`, `warn`, `error`) |
+| `SSH3_GATEWAY_PORTS` | `no` | Политика GatewayPorts для обратного (-R) форвардинга: `no` принудительно возвращает запрошенные не-loopback бинды на loopback, `clientspecified` чтит запрошенный адрес, `yes` биндит wildcard |
+| `SSH3_MAX_REVERSE_FORWARDS` | `10` | Максимум активных -R-слушателей на пользователя |
 | `LANG` | `C.UTF-8` | Локаль, пробрасываемая в шеллы пользователей |
 
 Применение изменений: `sudo systemctl restart ssh3-server`.

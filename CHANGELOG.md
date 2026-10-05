@@ -4,6 +4,15 @@ All notable changes to the **nagual2 fork** of SSH3, starting from the first for
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); each section maps to a release tag, newest first.
 
+## Unreleased
+
+### Changed
+- **GatewayPorts policy for reverse forwarding (`-R`)** (`cmd/reverse_forward_server.go`, `cmd/ssh3-server.go`): wide binds used to be honored with a warning. The server now applies the sshd_config semantics via `-gateway-ports no|clientspecified|yes` / `SSH3_GATEWAY_PORTS`, default `no`: every client-requested non-loopback bind is silently forced back to the loopback exactly as OpenSSH does (an info line names the rewrite), `clientspecified` honors the bind address the client asked for, `yes` binds the wildcard address. The bind reply carries the bound port only, so the change is wire-compatible with old clients. The per-bind wide-bind warning now fires only when a wide bind is actually taken under `clientspecified`/`yes`.
+- **Per-user reverse forward limits** (`cmd/reverse_forward_server.go`, `cmd/ssh3-server.go`): the server caps active `-R` listeners per authenticated user (`-max-reverse-forwards` / `SSH3_MAX_REVERSE_FORWARDS`, default 10) across their conversations, on top of the existing per-conversation forwarded-channel bound; a bind over the limit is refused with a readable error on the control channel and the budget slot is returned when the conversation ends.
+
+### Fixed
+- **Reverse UDP forwards silently truncated datagrams at the server socket** (`cmd/reverse_forward_server.go`): the `-R .../udp` listener read into a 1500-byte buffer, so larger datagrams were cut at the read and the send then failed with a generic error. Datagrams are now read whole; one that exceeds the QUIC datagram limit of the path is dropped with an explicit warning naming the size and the path limit — the datagram path is lossy by design, but no longer silently truncated.
+
 ## [0.1.25] - 2026-10-04
 
 ### Fixed

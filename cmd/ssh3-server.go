@@ -892,7 +892,29 @@ func ServerMain() int {
 	if unix_util.PasswordAuthAvailable() {
 		flag.BoolVar(&enablePasswordLogin, "enable-password-login", enablePasswordLogin, "if set, enable password authentication (disabled by default; SSH3_ENABLE_PASSWORD_LOGIN=1 sets it too)")
 	}
+	// The GatewayPorts policy of the reverse (-R) forwards, the sshd_config
+	// semantics; the env default lets systemd installs opt into wide binds
+	// without editing the unit's ExecStart.
+	gatewayPorts := os.Getenv("SSH3_GATEWAY_PORTS")
+	flag.StringVar(&gatewayPorts, "gateway-ports", gatewayPorts, "GatewayPorts policy for reverse (-R) forwarding: no (force loopback, default), clientspecified or yes; SSH3_GATEWAY_PORTS sets it too")
+	maxReverseForwards := 10
+	if envMax, err := strconv.Atoi(os.Getenv("SSH3_MAX_REVERSE_FORWARDS")); err == nil {
+		maxReverseForwards = envMax
+	}
+	flag.IntVar(&maxReverseForwards, "max-reverse-forwards", maxReverseForwards, "maximum active reverse (-R) listeners per user (SSH3_MAX_REVERSE_FORWARDS sets it too)")
 	flag.Parse()
+
+	if policy, err := parseGatewayPorts(gatewayPorts); err != nil {
+		fmt.Fprintf(os.Stderr, "the -gateway-ports/SSH3_GATEWAY_PORTS value is invalid: %v\n", err)
+		return -1
+	} else {
+		gatewayPortsPolicy = policy
+	}
+	if maxReverseForwards < 0 {
+		fmt.Fprintf(os.Stderr, "the -max-reverse-forwards/SSH3_MAX_REVERSE_FORWARDS value must not be negative\n")
+		return -1
+	}
+	maxReverseForwardsPerUser = maxReverseForwards
 
 	if *displayVersion {
 		fmt.Fprintln(os.Stdout, filepath.Base(os.Args[0]), "version", ssh3.GetCurrentSoftwareVersion())
@@ -1078,7 +1100,7 @@ func ServerMain() int {
 					// own goroutine, own lifetime: serving the -R bind request
 					// and its listener must not end the conversation the way a
 					// session does
-					go handleReverseForwardChannel(conv, channel)
+					go handleReverseForwardChannel(conv, channel, authenticatedUser)
 					continue
 				}
 				if channel.ChannelType() == ssh3Messages.ChannelTypeDynamicForward {
