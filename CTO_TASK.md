@@ -165,6 +165,50 @@ per-exec time ≤ 30% of the cold path; without: 100 handshakes. No new dependen
 4. Packaging: distro packages (deb/rpm), release pipeline without third-party toolchain downloads (current upstream release CI pulls musl toolchain from musl.cc — replace with reproducible local builds).
 5. Docs: deployment guide (self-signed + Let's Encrypt paths), threat model document.
 
+## 7a. Кросс-имплементационная матрица с ssh3-c: Go-сторона — P2, добавлено 2026-10-05
+
+Контекст. Матрица C-порта (`project/ssh3-c/interop/run-h3.sh`, 23 сценария) гоняет
+Go-сторону через харнес `s3interop` — модуль `project/ssh3-c/interop/quic-go/`
+(отдельный go.mod `module s3interop`, только quic-go, сам форк он не импортирует).
+В харнесе два пробела: нет UDP-форвардинга и нет pty/resize, поэтому направления
+«Go-клиент → C-сервер» по этим фичам не покрыты. У форка собственный CLI умеет и то
+и другое: `-forward-udp` (cmd/ssh3.go:387), `Client.ForwardUDP` (client/client.go:462),
+forced-pty + SIGWINCH (cmd/forced_pty.go, cmd/window_change_unix.go); свои B10/B11 в
+docs/FORWARDING-TESTPLAN.md — PASS, но только против Go-сервера. Пилот утвердил
+пункты 7a.1–7a.2 (исполнение отдельной сессией); 7a.3 — записанная альтернатива, отклонена.
+
+### 7a.1 `-fwd-udp` в харнесе + сценарий 24
+
+- Файл: `project/ssh3-c/interop/quic-go/main.go`. Режим `-h3-forward-client` сегодня
+  умеет только `-fwd-tcp localport/remoteip@remoteport`; добавить симметричный
+  `-fwd-udp localport/remoteip@remoteport`: локальный UDP listener, датаграммы →
+  датаграммы канала к C-серверу, обратно — эхо-сверка.
+- Wire со стороны C-сервера: direct-udp (датаграммы с префиксом
+  controlStreamID|channelID); эталон формата — C-клиент
+  `project/ssh3-c/interop/interop_client.c` (режим `-F udp=@port`).
+- Приёмка: сценарий 24 в `interop/run-h3.sh` («quic-go forward-client -fwd-udp →
+  C server», 20 датаграмм с эхо-сверкой — как C-сценарий 13), полный прогон матрицы
+  завершается `INTEROP-MATRIX OK`, счётчик сценариев 24.
+
+### 7a.2 pty/resize в харнесе + сценарий 25
+
+- Зависимость: добавить `github.com/creack/pty` в go.mod харнеса (в форке пин v1.1.18 —
+  версий не разводить).
+- Режим: `-h3-session-client -pty` — программная аллокация pty-пары (без живого
+  терминала), pty-реквест + exec на C-сервере, вывод через pty байт-сверяется; затем
+  resize (новый размер пары → SIGWINCH-релей шлёт WindowChange) и проверка, что
+  C-сервер применил новую геометрию (эхо-маркер после ресайза).
+- Эталоны форка: cmd/forced_pty.go, cmd/window_change_unix.go, client/client.go:60
+  (sendWindowChangeRequest).
+- Приёмка: сценарий 25 в run-h3.sh («quic-go pty-client → C server, exec через pty +
+  resize»), полный прогон матрицы OK, счётчик сценариев 25.
+
+### 7a.3 Записанная альтернатива (отклонена)
+
+Считать собственное покрытие форка достаточным (B10/B11 PASS против Go-сервера) и не
+расширять кросс-матрицу. Отклонено Пилотом 2026-10-05: асимметрию матрицы C-порта
+по UDP-форвардингу и pty закрывают пункты 7a.1–7a.2.
+
 ## 8. Non-goals
 
 - Do not chase X11 forwarding or interactive agent features before Stage 3 is done.
