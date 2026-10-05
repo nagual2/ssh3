@@ -67,7 +67,7 @@ func runSubsystemSession(ctx context.Context, c *client.Client, tty *os.File, na
 		return fmt.Errorf("could not send subsystem request for %q: %w", name, err)
 	}
 
-	err = c.PumpSession(channel, os.Stdin, os.Stdout, os.Stderr, ptyRequested)
+	err = c.PumpSession(channel, os.Stdin, os.Stdout, os.Stderr, ptyRequested, nil)
 	switch err.(type) {
 	case nil, client.ExitStatus, client.ExitSignal:
 		return err

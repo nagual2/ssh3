@@ -82,7 +82,7 @@ func newForcedPtySpec(tty *os.File) (*client.PtySpec, error) {
 
 // runForcedPtySession opens a session channel with a pty and bridges the
 // process stdio into it, returning the terminal event of the session.
-func runForcedPtySession(ctx context.Context, c *client.Client, tty *os.File, forwardSSHAgent bool, command ...string) error {
+func runForcedPtySession(ctx context.Context, c *client.Client, tty *os.File, forwardSSHAgent bool, escape *client.EscapeConfig, command ...string) error {
 	ptySpec, err := newForcedPtySpec(tty)
 	if err != nil {
 		return err
@@ -107,6 +107,12 @@ func runForcedPtySession(ctx context.Context, c *client.Client, tty *os.File, fo
 			log.Warn().Msgf("cannot make tty raw: %s", err)
 		} else {
 			defer term.Restore(int(os.Stdin.Fd()), oldState)
+
+			// the ~^Z suspend restores the terminal, SIGTSTPs the client
+			// and re-enters raw mode on resume
+			if escape != nil && escape.Char != 0 && escape.Suspend == nil {
+				escape.Suspend = client.LocalSuspendFunc(os.Stdin, oldState)
+			}
 		}
 	}
 	if ptyRequested {
@@ -117,7 +123,7 @@ func runForcedPtySession(ctx context.Context, c *client.Client, tty *os.File, fo
 	go forwardForcedPtySignals(ctx, channel)
 	go forwardForcedPtyWindowChanges(ctx, channel, tty)
 
-	err = c.PumpSession(channel, os.Stdin, os.Stdout, os.Stderr, ptyRequested)
+	err = c.PumpSession(channel, os.Stdin, os.Stdout, os.Stderr, ptyRequested, escape)
 	switch err.(type) {
 	case nil, client.ExitStatus, client.ExitSignal:
 		return err

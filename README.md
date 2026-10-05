@@ -64,6 +64,9 @@ Apply changes with `sudo systemctl restart ssh3-server`.
 
 Both client and server accept QUIC transport tuning flags for bulk transfers: `-initial-packet-size` (initial QUIC packet size in bytes, default `1350`), `-stream-rx-mb` (per-stream flow-control receive window in MiB, default `8`), and `-conn-rx-mb` (connection-level receive window in MiB, default `16`).
 
+## Interactive escape sequences
+An escape character at the start of a line controls the client: `~.` disconnects, `~^Z` suspends the client locally (unix), `~~` sends one literal `~`; an unknown sequence forwards literally. The character is `~` by default and is picked with `-o EscapeChar=<char|none>` or the same keyword in `~/.ssh/config`.
+
 ## Windows client notes
 - Flags (such as `-privkey`) must come **before** the positional URL: Go's flag parser stops at the first positional argument.
 - The console is switched to UTF-8 and VT processing for the session and restored on exit. Use a Unicode-capable font (Consolas, Lucida Console).

@@ -535,7 +535,7 @@ func (c *Client) ForwardTCP(ctx context.Context, localTCPAddr *net.TCPAddr, remo
 	return conn.Addr().(*net.TCPAddr), nil
 }
 
-func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, requestTTY string, command ...string) error {
+func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, requestTTY string, escape *EscapeConfig, command ...string) error {
 
 	ctx := c.Context()
 
@@ -606,6 +606,12 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, requestTTY strin
 			log.Warn().Msgf("cannot make tty raw: %s", err)
 		} else {
 			defer term.Restore(int(fd), oldState)
+
+			// the ~^Z suspend needs the console owner: restore the
+			// terminal, SIGTSTP the client and re-enter raw mode on resume
+			if escape != nil && escape.Char != 0 && escape.Suspend == nil {
+				escape.Suspend = LocalSuspendFunc(os.Stdin, oldState)
+			}
 		}
 		// full-screen remote apps (vim, mc) speak ANSI: the local console
 		// must interpret escape sequences too
@@ -625,9 +631,15 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, requestTTY strin
 
 	// drive the session with the process stdio; a ControlMaster (stage 3.5)
 	// bridges other pipes into the same pump via PumpSession
-	err = c.PumpSession(channel, os.Stdin, os.Stdout, os.Stderr, ptyRequested)
+	err = c.PumpSession(channel, os.Stdin, os.Stdout, os.Stderr, ptyRequested, escape)
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, ErrEscapeDisconnect) {
+		// the user tore the session down with the ~. escape sequence: the
+		// Disconnect callback closed the connection, the exit code is the
+		// caller's decision (255, like a closed connection)
+		return err
 	}
 	switch err.(type) {
 	case ExitStatus, ExitSignal:

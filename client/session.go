@@ -120,6 +120,6 @@ func (c *Client) OpenSession(_ context.Context, spec SessionSpec) (ssh3.Channel,
 // PumpSession bridges local streams to an opened session channel until the
 // remote side terminates it. The returned error is the terminal event
 // (ExitStatus/ExitSignal) or a transport failure.
-func (c *Client) PumpSession(channel ssh3.Channel, stdin io.Reader, stdout, stderr io.Writer, ptyRequested bool) error {
-	return pumpSessionStreams(channel, sessionIO{stdin: stdin, stdout: stdout, stderr: stderr}, ptyRequested)
+func (c *Client) PumpSession(channel ssh3.Channel, stdin io.Reader, stdout, stderr io.Writer, ptyRequested bool, escape *EscapeConfig) error {
+	return pumpSessionStreams(channel, sessionIO{stdin: stdin, stdout: stdout, stderr: stderr}, ptyRequested, escape)
 }

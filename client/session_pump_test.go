@@ -109,7 +109,7 @@ func TestPumpExecStreamsDataAndExit(t *testing.T) {
 		stdin:  strings.NewReader("ping"),
 		stdout: &out,
 		stderr: &errBuf,
-	}, false)
+	}, false, nil)
 
 	var es ExitStatus
 	if !errors.As(err, &es) {
@@ -146,7 +146,7 @@ func TestPumpStdinWriteErrorKeepsChannelOpen(t *testing.T) {
 		stdin:  strings.NewReader("data"),
 		stdout: &out,
 		stderr: &errBuf,
-	}, false)
+	}, false, nil)
 
 	var es ExitStatus
 	if !errors.As(err, &es) || es.StatusCode != 255 {
@@ -170,7 +170,7 @@ func TestPumpTruncatedTransferDetected(t *testing.T) {
 	defer pw.Close()
 
 	var out bytes.Buffer
-	err := pumpSessionStreams(fc, sessionIO{stdin: pr, stdout: &out, stderr: &out}, false)
+	err := pumpSessionStreams(fc, sessionIO{stdin: pr, stdout: &out, stderr: &out}, false, nil)
 
 	var es ExitStatus
 	if !errors.As(err, &es) {
@@ -197,7 +197,7 @@ func TestPumpTruncatedTransferHalfClosesChannel(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	resCh := make(chan error, 1)
 	go func() {
-		resCh <- pumpSessionStreams(fc, sessionIO{stdin: pr, stdout: &out, stderr: &errBuf}, false)
+		resCh <- pumpSessionStreams(fc, sessionIO{stdin: pr, stdout: &out, stderr: &errBuf}, false, nil)
 	}()
 	select {
 	case err := <-resCh:
@@ -228,7 +228,7 @@ func TestPumpPtyExitDrainIsBounded(t *testing.T) {
 
 	var out, errBuf bytes.Buffer
 	start := time.Now()
-	err := pumpSessionStreams(fc, sessionIO{stdin: pr, stdout: &out, stderr: &errBuf}, true)
+	err := pumpSessionStreams(fc, sessionIO{stdin: pr, stdout: &out, stderr: &errBuf}, true, nil)
 	elapsed := time.Since(start)
 
 	var es ExitStatus
@@ -266,7 +266,7 @@ func TestPumpPtyExitHalfClosesChannel(t *testing.T) {
 
 	var out, errBuf bytes.Buffer
 	start := time.Now()
-	err := pumpSessionStreams(fc, sessionIO{stdin: pr, stdout: &out, stderr: &errBuf}, true)
+	err := pumpSessionStreams(fc, sessionIO{stdin: pr, stdout: &out, stderr: &errBuf}, true, nil)
 	elapsed := time.Since(start)
 
 	var es ExitStatus

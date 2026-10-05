@@ -59,7 +59,7 @@ func writeSessionData(sio sessionIO, data *ssh3Messages.DataOrExtendedDataMessag
 // pumpSessionStreams drives one established session channel until the remote
 // side terminates it. It returns ExitStatus/ExitSignal as the terminal event;
 // any other error is a stream failure, for the caller to report.
-func pumpSessionStreams(channel sessionChannel, sio sessionIO, ptyRequested bool) error {
+func pumpSessionStreams(channel sessionChannel, sio sessionIO, ptyRequested bool, escape *EscapeConfig) error {
 	// Synchronized between the stdin pump below and the session loop: the send
 	// half is closed (QUIC FIN) only after every local input byte was handed
 	// to the channel. An exit status received while it is still open means the
@@ -76,17 +76,53 @@ func pumpSessionStreams(channel sessionChannel, sio sessionIO, ptyRequested bool
 	// whether the transfer was truncated
 	pumpDone := make(chan struct{})
 
+	// the interactive escape filter (OpenSSH-style ~. / ~^Z / ~~): one
+	// instance for the whole pump so a sequence split across reads still
+	// fires; nil for exec traffic and when no escape character is set
+	var filter *escapeFilter
+	if escape != nil && ptyRequested && escape.Char != 0 {
+		filter = newEscapeFilter(escape)
+	}
+
 	go func() {
 		defer close(pumpDone)
 		buf := make([]byte, channel.MaxPacketSize())
 		for {
 			n, err := sio.stdin.Read(buf)
 			if n > 0 {
-				_, err2 := channel.WriteData(buf[:n], ssh3Messages.SSH_EXTENDED_DATA_NONE)
-				if err2 != nil {
-					fmt.Fprintf(sio.stderr, "could not write data on channel: %+v", err2)
-					writeFailed.Store(true)
-					return
+				payload := buf[:n]
+				if filter != nil {
+					var action string
+					payload, action = filter.Feed(buf[:n])
+
+					if action == "disconnect" {
+						if len(payload) > 0 {
+							if _, err2 := channel.WriteData(payload, ssh3Messages.SSH_EXTENDED_DATA_NONE); err2 != nil {
+								writeFailed.Store(true)
+							}
+						}
+
+						if err2 := escape.Disconnect(); err2 != nil {
+							fmt.Fprintf(sio.stderr, "escape disconnect failed: %+v", err2)
+						}
+
+						return
+					}
+
+					if action == "suspend" {
+						if err2 := escape.Suspend(); err2 != nil {
+							fmt.Fprintf(sio.stderr, "escape suspend failed: %+v", err2)
+						}
+					}
+				}
+
+				if len(payload) > 0 {
+					_, err2 := channel.WriteData(payload, ssh3Messages.SSH_EXTENDED_DATA_NONE)
+					if err2 != nil {
+						fmt.Fprintf(sio.stderr, "could not write data on channel: %+v", err2)
+						writeFailed.Store(true)
+						return
+					}
 				}
 			}
 			if err != nil {

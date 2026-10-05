@@ -510,7 +510,7 @@ func runMasterBridge(sess *cmSession, ioConn, errConn net.Conn, st *masterState)
 		stdin:  ioConn,
 		stdout: ioConn,
 		stderr: errConn,
-	}, sess.ptyRequested)
+	}, sess.ptyRequested, nil)
 
 	code := 255
 	var es ExitStatus

@@ -250,3 +250,30 @@ func parseRequestTTY(value string) (string, error) {
 		return "", fmt.Errorf("invalid RequestTTY policy %q: want auto, no, yes or force", value)
 	}
 }
+
+// parseEscapeChar validates the EscapeChar value (-o EscapeChar=... and the
+// ~/.ssh/config keyword) and returns its byte: a single ASCII printable
+// character, a control form (^A..^Z, ^[, ^], ^? with ^? = 127) or "none"
+// (0 = the escape sequences are disabled, the OpenSSH default is ~).
+func parseEscapeChar(value string) (byte, error) {
+	switch {
+	case strings.EqualFold(strings.TrimSpace(value), "none"), strings.TrimSpace(value) == "":
+		return 0, nil
+	case len(value) == 2 && value[0] == '^':
+		switch upper := value[1]; {
+		case upper >= 'A' && upper <= 'Z':
+			return upper - 'A' + 1, nil
+		case upper == '[':
+			return 27, nil
+		case upper == ']':
+			return 29, nil
+		case upper == '?':
+			return 127, nil
+		}
+		return 0, fmt.Errorf("invalid EscapeChar control form %q: want ^A..^Z, ^[, ^] or ^?", value)
+	case len(value) == 1 && value[0] >= 0x21 && value[0] <= 0x7e:
+		return value[0], nil
+	default:
+		return 0, fmt.Errorf("invalid EscapeChar %q: want one ASCII printable character, a ^X control form or none", value)
+	}
+}

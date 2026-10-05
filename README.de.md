@@ -64,6 +64,9 @@ Das Release-Paket wird über die systemd-`EnvironmentFile` unter `/etc/ssh3/ssh3
 
 Client und Server akzeptieren QUIC-Tuning-Flags für Bulk-Transfers: `-initial-packet-size` (initiale QUIC-Paketgröße in Bytes, Standard `1350`), `-stream-rx-mb` (Flow-Control-Empfangsfenster pro Stream in MiB, Standard `8`) und `-conn-rx-mb` (Empfangsfenster auf Verbindungsebene in MiB, Standard `16`).
 
+## Interaktive Escape-Sequenzen
+Ein Escape-Zeichen am Zeilenanfang steuert den Client: `~.` trennt die Verbindung, `~^Z` stoppt den Client lokal (unix), `~~` sendet ein literales `~`; eine unbekannte Sequenz wird wörtlich weitergeleitet. Das Zeichen ist standardmäßig `~` und wird mit `-o EscapeChar=<Zeichen|none>` oder demselben Schlüsselwort in `~/.ssh/config` gewählt.
+
 ## Hinweise zum Windows-Client
 - Flags (z. B. `-privkey`) müssen **vor** der positionalen URL stehen: Gos Flag-Parser stoppt beim ersten positionalen Argument.
 - Die Konsole wird für die Sitzung auf UTF-8 und VT-Verarbeitung umgeschaltet und beim Beenden zurückgesetzt. Verwenden Sie einen Unicode-fähigen Zeichensatz (Consolas, Lucida Console).

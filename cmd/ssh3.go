@@ -735,6 +735,7 @@ func ClientMain() int {
 	verifyHostKeyDNSOptionValue := ""
 	verifyHostKeyDNSOptionSet := false
 	requestTTYOption := "" // the -o RequestTTY=... value, empty when unset
+	escapeCharOption := "" // the -o EscapeChar=... value, empty when unset
 	parsersByKeyword := make(map[string]client_config.OptionName)
 	for optionName, parser := range cliParsers {
 		keyword := strings.ToLower(parser.OptionConfigName())
@@ -751,6 +752,16 @@ func ClientMain() int {
 				return -1
 			}
 			strictOptionValue = strings.TrimSpace(value)
+			continue
+		}
+		if strings.EqualFold(key, "EscapeChar") {
+			// validated here so a bad -o value is rejected like every other
+			// malformed option, before the connection is set up
+			if _, err := parseEscapeChar(value); err != nil {
+				log.Error().Msgf("%s", err)
+				return -1
+			}
+			escapeCharOption = strings.TrimSpace(value)
 			continue
 		}
 		if strings.EqualFold(key, "RequestTTY") {
@@ -1071,6 +1082,7 @@ func ClientMain() int {
 	// ssh3-server). Include directives are resolved by the config library.
 	tuning.KeepAlivePeriod = time.Second
 	requestTTYConfig := "" // the ~/.ssh/config RequestTTY value, empty when unset
+	escapeCharConfig := "" // the ~/.ssh/config EscapeChar value, empty when unset
 	if sshConfig != nil {
 		hostname := parsedUrl.Hostname()
 		if v, err := sshConfig.Get(hostname, "ServerAliveInterval"); err == nil && v != "" {
@@ -1089,6 +1101,13 @@ func ClientMain() int {
 				return -1
 			}
 			requestTTYConfig = policy
+		}
+		if v, err := sshConfig.Get(hostname, "EscapeChar"); err == nil && v != "" {
+			if _, err := parseEscapeChar(v); err != nil {
+				log.Error().Msgf("%s", err)
+				return -1
+			}
+			escapeCharConfig = v
 		}
 		if *proxyJump == "" {
 			if v, err := sshConfig.Get(hostname, "UDPProxyJump"); err == nil && v != "" {
@@ -1347,6 +1366,32 @@ func ClientMain() int {
 		requestTYTPolicy = "force"
 	}
 
+	// the interactive escape character: the -o option overrides the
+	// ~/.ssh/config keyword, ~ is the OpenSSH default, none disables
+	escapeCharStr := "~"
+	if escapeCharConfig != "" {
+		escapeCharStr = escapeCharConfig
+	}
+	if escapeCharOption != "" {
+		escapeCharStr = escapeCharOption
+	}
+	escapeChar, err := parseEscapeChar(escapeCharStr)
+	if err != nil {
+		log.Error().Msgf("%s", err)
+		return -1
+	}
+	var escapeCfg *client.EscapeConfig
+	if escapeChar != 0 {
+		escapeCfg = &client.EscapeConfig{
+			Char: escapeChar,
+			Disconnect: func() error {
+				log.Info().Msgf("connection closed by the %q escape sequence", string(escapeChar))
+				c.Close()
+				return nil
+			},
+		}
+	}
+
 	// -s requests a subsystem instead of a shell or a command: it owns the
 	// session channel, so it is dispatched before the shell/exec path and is
 	// mutually exclusive with it.
@@ -1383,7 +1428,10 @@ func ClientMain() int {
 	// regular session path cannot do: RunSession only allocates one when it
 	// finds a TTY.
 	if *forcePTY || requestTYTPolicy == "force" {
-		err = runForcedPtySession(ctx, c, tty, *forwardSSHAgent, command...)
+		err = runForcedPtySession(ctx, c, tty, *forwardSSHAgent, escapeCfg, command...)
+		if errors.Is(err, client.ErrEscapeDisconnect) {
+			return 255
+		}
 		switch sessionError := err.(type) {
 		case client.ExitStatus:
 			log.Info().Msgf("the process exited with status %d", sessionError.StatusCode)
@@ -1397,7 +1445,12 @@ func ClientMain() int {
 		}
 	}
 
-	err = c.RunSession(tty, *forwardSSHAgent, requestTYTPolicy, command...)
+	err = c.RunSession(tty, *forwardSSHAgent, requestTYTPolicy, escapeCfg, command...)
+	if errors.Is(err, client.ErrEscapeDisconnect) {
+		// the user tore the session down with the ~. escape sequence:
+		// the exit code matches a closed connection, as OpenSSH
+		return 255
+	}
 	switch sessionError := err.(type) {
 	case client.ExitStatus:
 		log.Info().Msgf("the process exited with status %d", sessionError.StatusCode)
