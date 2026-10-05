@@ -164,6 +164,7 @@ per-exec time ≤ 30% of the cold path; without: 100 handshakes. No new dependen
 3. FIDO2/hardware keys (`ed25519-sk` semantics), SSH certificate authority model.
 4. Packaging: distro packages (deb/rpm), release pipeline without third-party toolchain downloads (current upstream release CI pulls musl toolchain from musl.cc — replace with reproducible local builds).
 5. Docs: deployment guide (self-signed + Let's Encrypt paths), threat model document.
+6. Terminal parity (EncodedTerminalModes, RequestTTY, Windows resize, exit-signal, EscapeChar) — выделено в §7b, 2026-10-05.
 
 ## 7a. Кросс-имплементационная матрица с ssh3-c: Go-сторона — P2, добавлено 2026-10-05
 
@@ -218,6 +219,20 @@ docs/FORWARDING-TESTPLAN.md — PASS, но только против Go-серв
 Считать собственное покрытие форка достаточным (B10/B11 PASS против Go-сервера) и не
 расширять кросс-матрицу. Отклонено Пилотом 2026-10-05: асимметрию матрицы C-порта
 по UDP-форвардингу и pty закрывают пункты 7a.1–7a.2.
+
+## 7b. Terminal parity — P2, добавлено 2026-10-05
+
+TTY/терминальный паритет с OpenSSH. Базовый PTY (openpty, resize, сигналы) приехал
+готовым из апстрима и в стадиях не планировался; пробелы выявлены ревизией паритета
+2026-10-05. Порядок внутри стадии: 1 → 2 → 3 → 4, EscapeChar — последним.
+
+| # | Пункт | Приёмка |
+|---|-------|---------|
+| 1 | Применять `EncodedTerminalModes`: поле парсится (`message/channel_request.go:106`), но `newPtyReq` игнорирует его — накладываются только TERM и размер окна. Парсить wire-формат RFC 4254 §8 (opcode + arg uint32; 192/193 ISPEED/OSPEED — uint32 bps), накладывать termios (TCSETS) на слейв; TTY_OP_END и неизвестные opcode пропускать, как OpenSSH | юнит-тест парсера (вкл. усечение и мусор); живая проверка: клиент шлёт ECHO/ICANON, `stty -a` на удалённом слейве показывает применённые флаги; кривые modes не роняют сессию |
+| 2 | `RequestTTY`: `-o RequestTTY=yes|no|force|auto` + ключ в `~/.ssh/config`; флаг `-T` (never) в пару к `-t` | пламбинг флагов/конфига с тестами; `-T host true` не запрашивает pty, `-o RequestTTY=force` запрашивает pty и без локального tty |
+| 3 | Windows: форвард ресайза консоли как window-change (сейчас no-op стаб в `cmd/window_change_windows.go`): `ReadConsoleInput`, `WINDOW_BUFFER_SIZE_EVENT` → `sendWindowChangeRequest` | на Win11 VM (Windows-тесты — только там): ресайз консоли в forced-pty сессии доходит до удалённого `stty size` |
+| 4 | exit-signal вместо 255: при сигнальной гибели процесса сервер шлёт `98 exit-signal` (signal name, core-dumped, сообщение), клиент мапит в 128+signum; сейчас `safeExitStatus` (`cmd/exit_status.go`) шлёт exit-status 255. Старые клиенты должны терпеть новый тип запроса на канале — проверять против клиента v0.1.25 | `kill -SEGV $$` в pty-сессии → клиентский exit code 139; сессия против клиента v0.1.25 не ломается |
+| 5 | EscapeChar для интерактивных сессий (`~.`, `~^Z`, `~#`), `-o EscapeChar=` — наименьший приоритет стадии, после 1–4 | `~.` рвёт сессию с чистым teardown; `~^Z` подвешивает клиент локально (unix); символ переопределяется опцией |
 
 ## 8. Non-goals
 
