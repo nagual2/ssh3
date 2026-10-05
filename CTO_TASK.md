@@ -189,6 +189,10 @@ docs/FORWARDING-TESTPLAN.md — PASS, но только против Go-серв
 - Приёмка: сценарий 24 в `interop/run-h3.sh` («quic-go forward-client -fwd-udp →
   C server», 20 датаграмм с эхо-сверкой — как C-сценарий 13), полный прогон матрицы
   завершается `INTEROP-MATRIX OK`, счётчик сценариев 24.
+  — **done 2026-10-05** (`s3UDPForwarder` в main.go: один direct-udp канал на
+  локальный адрес-источник, семантика форка `ForwardUDP`; `s3DialAndConnect` получил
+  флаг датаграмм; ран сам драйвит 20 датаграмм 1024 B с эхо-сверкой и вердиктом
+  `INTEROP-GO-FWD-UDP-OK count=20`; сценарий 24 в run-h3.sh; матрица 25/25 PASS).
 
 ### 7a.2 pty/resize в харнесе + сценарий 25
 
@@ -202,6 +206,12 @@ docs/FORWARDING-TESTPLAN.md — PASS, но только против Go-серв
   (sendWindowChangeRequest).
 - Приёмка: сценарий 25 в run-h3.sh («quic-go pty-client → C server, exec через pty +
   resize»), полный прогон матрицы OK, счётчик сценариев 25.
+  — **done 2026-10-05** (`pty_unix.go`/`pty_other.go` с билд-тегами, creack/pty
+  v1.1.18; пара 80x24 → pty-req + exec `stty size; sleep 1; stty size`, после первой
+  геометрии `Setsize(40x100)` + SIGWINCH себе → релей шлёт window-change; вердикт
+  `INTEROP-GO-PTY-OK resize=40x100` при порядке маркеров `24 80` → `40 100`;
+  `s3SessionExecRead` переведён на callback `onConfirmed` — kill-логика переехала в
+  вызывающего; сценарий 25 в run-h3.sh; матрица 25/25 PASS).
 
 ### 7a.3 Записанная альтернатива (отклонена)
 
