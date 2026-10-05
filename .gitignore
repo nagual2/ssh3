@@ -4,3 +4,6 @@ dist/
 
 # local-only bug briefs (real LAN addresses, never publish)
 docs/BUG-*.md
+
+# full internal roadmap (VPN R4 etc.) - sanitized stub is published instead
+docs/ROADMAP.local.md
