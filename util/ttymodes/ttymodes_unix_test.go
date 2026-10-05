@@ -1,4 +1,4 @@
-//go:build unix
+//go:build linux
 
 // Copyright 2026 The nagual2 ssh3 Authors.
 // SPDX-License-Identifier: Apache-2.0
