@@ -29,20 +29,22 @@ This fork focuses on making the Go implementation a practical daily driver. This
 - **CI.** Every `v*` tag produces release archives and a `.deb` via goreleaser; every push to `main` produces Windows client artifacts.
 
 ## Download & Install
-Grab the assets from the [latest release](https://github.com/nagual2/ssh3/releases/latest):
+Grab the assets from the [latest release](https://github.com/nagual2/ssh3-go/releases/latest):
 
 | File | Purpose |
 | --- | --- |
-| `ssh3_client_<ver>_windows_amd64.zip` | Windows client (`ssh3.exe`) |
-| `ssh3_client_<ver>_<os>_<arch>.tar.gz` | Client for Linux, macOS, FreeBSD, OpenBSD |
-| `ssh3_server_<ver>_linux_<arch>.tar.gz` | Linux server binaries |
-| `ssh3_<ver>_amd64.deb` | Server + client package for Debian/Ubuntu/Mint (systemd service, keys by default; password auth opt-in on amd64) |
+| `ssh3-go_client_<ver>_windows_amd64.zip` | Windows client (`ssh3.exe`) |
+| `ssh3-go_client_<ver>_<os>_<arch>.tar.gz` | Client for Linux, macOS, FreeBSD, OpenBSD |
+| `ssh3-go_server_<ver>_linux_<arch>.tar.gz` | Linux server binaries |
+| `ssh3-go_<ver>_amd64.deb` | Server + client package for Debian/Ubuntu/Mint (systemd service, keys by default; password auth opt-in on amd64) |
 
 Install the Debian package:
 
 ```bash
-sudo dpkg -i ssh3_0.1.22_amd64.deb
+sudo dpkg -i ssh3-go_0.1.26_amd64.deb
 ```
+
+The `ssh3-go` package replaces the previous `ssh3` package in place (Conflicts/Replaces); binaries (`ssh3`, `ssh3-server`) and the `ssh3-server.service` unit keep their names.
 
 The service listens on UDP 443 under the secret URL path `/ssh3-term`. Configuration lives in `/etc/ssh3/ssh3-server.env` (log file and level, `LANG`), the systemd unit in `/usr/lib/systemd/system/ssh3-server.service`, and a self-signed ed25519 certificate with IP/DNS SANs is generated in `/etc/ssh3/` on install if missing.
 

@@ -29,20 +29,22 @@ SSH3 переносит семантику удалённых сессий в д
 - **CI.** Каждый тег `v*` собирает релизные архивы и `.deb` через goreleaser; каждый пуш в `main` — артефакты Windows-клиента.
 
 ## Скачивание и установка
-Берите ассеты из [последнего релиза](https://github.com/nagual2/ssh3/releases/latest):
+Берите ассеты из [последнего релиза](https://github.com/nagual2/ssh3-go/releases/latest):
 
 | Файл | Назначение |
 | --- | --- |
-| `ssh3_client_<ver>_windows_amd64.zip` | Клиент для Windows (`ssh3.exe`) |
-| `ssh3_client_<ver>_<os>_<arch>.tar.gz` | Клиент для Linux, macOS, FreeBSD, OpenBSD |
-| `ssh3_server_<ver>_linux_<arch>.tar.gz` | Серверные бинарники для Linux |
-| `ssh3_<ver>_amd64.deb` | Пакет сервер + клиент для Debian/Ubuntu/Mint (systemd-сервис, ключи по умолчанию; пароли — opt-in на amd64) |
+| `ssh3-go_client_<ver>_windows_amd64.zip` | Клиент для Windows (`ssh3.exe`) |
+| `ssh3-go_client_<ver>_<os>_<arch>.tar.gz` | Клиент для Linux, macOS, FreeBSD, OpenBSD |
+| `ssh3-go_server_<ver>_linux_<arch>.tar.gz` | Серверные бинарники для Linux |
+| `ssh3-go_<ver>_amd64.deb` | Пакет сервер + клиент для Debian/Ubuntu/Mint (systemd-сервис, ключи по умолчанию; пароли — opt-in на amd64) |
 
 Установка deb-пакета:
 
 ```bash
-sudo dpkg -i ssh3_0.1.22_amd64.deb
+sudo dpkg -i ssh3-go_0.1.26_amd64.deb
 ```
+
+Пакет `ssh3-go` заменяет прежний пакет `ssh3` на месте (Conflicts/Replaces); бинарники (`ssh3`, `ssh3-server`) и юнит `ssh3-server.service` сохраняют имена.
 
 Сервис слушает UDP 443 по секретному URL-пути `/ssh3-term`. Конфигурация — в `/etc/ssh3/ssh3-server.env` (файл и уровень лога, `LANG`), юнит — в `/usr/lib/systemd/system/ssh3-server.service`, а self-signed сертификат ed25519 с IP/DNS SAN генерируется в `/etc/ssh3/` при установке, если его нет.
 

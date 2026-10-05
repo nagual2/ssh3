@@ -29,20 +29,22 @@ Dieser Fork zielt darauf ab, die Go-Implementierung zu einem praktischen Alltags
 - **CI.** Jedes `v*`-Tag erzeugt Release-Archive und ein `.deb` via goreleaser; jeder Push nach `main` erzeugt Windows-Client-Artefakte.
 
 ## Download & Installation
-Die Assets gibt es im [neuesten Release](https://github.com/nagual2/ssh3/releases/latest):
+Die Assets gibt es im [neuesten Release](https://github.com/nagual2/ssh3-go/releases/latest):
 
 | Datei | Zweck |
 | --- | --- |
-| `ssh3_client_<ver>_windows_amd64.zip` | Windows-Client (`ssh3.exe`) |
-| `ssh3_client_<ver>_<os>_<arch>.tar.gz` | Client für Linux, macOS, FreeBSD, OpenBSD |
-| `ssh3_server_<ver>_linux_<arch>.tar.gz` | Linux-Server-Binaries |
-| `ssh3_<ver>_amd64.deb` | Server-+-Client-Paket für Debian/Ubuntu/Mint (systemd-Dienst, standardmäßig Schlüssel; Passwort-Authentifizierung als Opt-in auf amd64) |
+| `ssh3-go_client_<ver>_windows_amd64.zip` | Windows-Client (`ssh3.exe`) |
+| `ssh3-go_client_<ver>_<os>_<arch>.tar.gz` | Client für Linux, macOS, FreeBSD, OpenBSD |
+| `ssh3-go_server_<ver>_linux_<arch>.tar.gz` | Linux-Server-Binaries |
+| `ssh3-go_<ver>_amd64.deb` | Server-+-Client-Paket für Debian/Ubuntu/Mint (systemd-Dienst, standardmäßig Schlüssel; Passwort-Authentifizierung als Opt-in auf amd64) |
 
 Installation des Debian-Pakets:
 
 ```bash
-sudo dpkg -i ssh3_0.1.22_amd64.deb
+sudo dpkg -i ssh3-go_0.1.26_amd64.deb
 ```
+
+Das Paket `ssh3-go` ersetzt das bisherige Paket `ssh3` direkt (Conflicts/Replaces); Binärdateien (`ssh3`, `ssh3-server`) und die Unit `ssh3-server.service` behalten ihre Namen.
 
 Der Dienst lauscht auf UDP 443 unter dem geheimen URL-Pfad `/ssh3-term`. Die Konfiguration liegt in `/etc/ssh3/ssh3-server.env` (Logdatei und -level, `LANG`), die systemd-Unit in `/usr/lib/systemd/system/ssh3-server.service`; ein selbstsigniertes ed25519-Zertifikat mit IP/DNS-SANs wird bei der Installation in `/etc/ssh3/` erzeugt, falls es fehlt.
 

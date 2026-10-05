@@ -1,11 +1,11 @@
 # Copyright 2026 The nagual2 ssh3 Authors.
 # SPDX-License-Identifier: Apache-2.0
 
-# goreleaser v2 release pipeline for nagual2/ssh3.
+# goreleaser v2 release pipeline for nagual2/ssh3-go.
 # Triggered by .github/workflows/release.yml on v* tags.
 version: 2
 
-project_name: ssh3
+project_name: ssh3-go
 
 builds:
   - id: client
@@ -115,15 +115,15 @@ checksum:
   name_template: checksums.txt
 
 nfpms:
-  - id: ssh3
-    package_name: ssh3
+  - id: ssh3-go
+    package_name: ssh3-go
     ids:
       - client
       - server
       - serverkeyonly
     file_name_template: "{{ .ConventionalFileName }}"
     vendor: nagual2
-    homepage: https://github.com/nagual2/ssh3
+    homepage: https://github.com/nagual2/ssh3-go
     maintainer: Max <max@localhost>
     description: |-
       SSH3 - Secure Shell over QUIC/HTTP-3 (server and client).
@@ -137,6 +137,10 @@ nfpms:
       - openssl
       - systemd
       - libcrypt1
+    replaces:
+      - ssh3
+    conflicts:
+      - ssh3
     bindir: /usr/bin
     contents:
       - src: packaging/ssh3-server.service

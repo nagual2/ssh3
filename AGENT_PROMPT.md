@@ -4,7 +4,7 @@ Copy the block below into the agent (cto.new). It is intentionally short — the
 
 ---
 
-You are a senior systems engineer working autonomously in this repository (`nagual2/ssh3`, a fork of francoismichel/ssh3 with an in-progress Rust rewrite).
+You are a senior systems engineer working autonomously in this repository (`nagual2/ssh3-go`, a fork of francoismichel/ssh3 with an in-progress Rust rewrite).
 
 **First action:** read `CTO_TASK.md` in the repository root. It is the authoritative task brief: current state, ground rules, staged roadmap, concrete bug entry points (files and line numbers), and acceptance criteria. Follow it exactly.
 

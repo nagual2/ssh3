@@ -1,7 +1,7 @@
 # CTO Task: Bring SSH3 to OpenSSH (SSHv2) parity
 
 > Task brief for an autonomous engineering agent working in this repository.
-> Fork lineage: `nagual2/ssh3` ← `MatiasHiltunen/ssh3` (+13 commits, Rust rewrite) ← upstream `francoismichel/ssh3` (dormant since 2024-09-04, HEAD `5b4b242`).
+> Fork lineage: `nagual2/ssh3-go` (renamed from nagual2/ssh3, 2026-10-05) ← `MatiasHiltunen/ssh3` (+13 commits, Rust rewrite) ← upstream `francoismichel/ssh3` (dormant since 2024-09-04, HEAD `5b4b242`).
 
 ## 1. Mission
 
