@@ -83,12 +83,29 @@ func HandleAuths(ctx context.Context, enablePasswordLogin bool, defaultMaxPacket
 			return
 		}
 
+		// the unauthenticated phase holds a DoS slot (the MaxStartups
+		// analog): from the conversation creation to the auth verdict, the
+		// slot returns on every refusal and on success stays for the talk
+		if !TryAcquireUnauthenticatedConversation() {
+			log.Warn().Msgf("too many unauthenticated conversations (%d active), refusing the request for user %s",
+				MaxUnauthenticatedConversations, username)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		authenticated := false
+		defer func() {
+			if !authenticated {
+				ReleaseUnauthenticatedConversation()
+			}
+		}()
+
 		// first, handle the HTTP request verifiers (often plugins)
 		for _, abstractVerifier := range identityVerifiers {
 			switch verifier := abstractVerifier.(type) {
 			case *WrappedPluginVerifier:
 				if verifier.Verify(r, base64ConvID) {
 					log.Debug().Msgf("request for user %s successfully verified by plugin", username)
+					authenticated = true
 					handlerFunc(username, conv, w, r)
 					return
 				}
@@ -99,12 +116,19 @@ func HandleAuths(ctx context.Context, enablePasswordLogin bool, defaultMaxPacket
 
 		authorization := r.Header.Get("Authorization")
 		if enablePasswordLogin && strings.HasPrefix(authorization, "Basic ") {
-			HandleBasicAuth(handlerFunc, conv)(w, r)
+			if CheckBasicAuth(username, w, r) {
+				authenticated = true
+				handlerFunc(username, conv, w, r)
+			}
+			return
 		} else if strings.HasPrefix(authorization, "Bearer ") {
-			HandleBearerAuth(username, base64ConvID, HandleJWTAuth(username, conv, identityVerifiers, handlerFunc))(w, r)
-		} else {
-			w.WriteHeader(http.StatusUnauthorized)
+			if VerifyJWT(identityVerifiers, base64ConvID, w, r) {
+				authenticated = true
+				handlerFunc(username, conv, w, r)
+			}
+			return
 		}
+		w.WriteHeader(http.StatusUnauthorized)
 	}, nil
 }
 

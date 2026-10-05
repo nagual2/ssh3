@@ -55,6 +55,9 @@ The release package is configured through the systemd `EnvironmentFile` at `/etc
 | `SSH3_LOG_LEVEL` | `info` | Log verbosity (`trace`, `debug`, `info`, `warn`, `error`) |
 | `SSH3_GATEWAY_PORTS` | `no` | GatewayPorts policy for reverse (-R) forwarding: `no` forces client-requested non-loopback binds back to the loopback, `clientspecified` honors the requested bind address, `yes` binds the wildcard |
 | `SSH3_MAX_REVERSE_FORWARDS` | `10` | Maximum active reverse (-R) listeners per user |
+| `SSH3_MAX_UNAUTH_CONVERSATIONS` | `100` | Maximum conversations sitting unauthenticated before refusals (DoS guard) |
+| `SSH3_MAX_PASSWORD_FAILURES` | `10` | Failed password attempts before the account lockout |
+| `SSH3_PASSWORD_LOCKOUT_SECONDS` | `60` | Password brute-force lockout duration in seconds |
 | `LANG` | `C.UTF-8` | Locale forwarded to user shells |
 
 Apply changes with `sudo systemctl restart ssh3-server`.

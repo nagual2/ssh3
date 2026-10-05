@@ -55,6 +55,9 @@ Das Release-Paket wird über die systemd-`EnvironmentFile` unter `/etc/ssh3/ssh3
 | `SSH3_LOG_LEVEL` | `info` | Log-Ausführlichkeit (`trace`, `debug`, `info`, `warn`, `error`) |
 | `SSH3_GATEWAY_PORTS` | `no` | GatewayPorts-Richtlinie für Reverse-(-R-)Weiterleitungen: `no` erzwingt angeforderte Nicht-Loopback-Binds zurück auf den Loopback, `clientspecified` übernimmt die angeforderte Adresse, `yes` bindet die Wildcard-Adresse |
 | `SSH3_MAX_REVERSE_FORWARDS` | `10` | Maximale aktive -R-Listener pro Benutzer |
+| `SSH3_MAX_UNAUTH_CONVERSATIONS` | `100` | Maximale nicht authentifizierte Konversationen vor Ablehnungen (DoS-Schutz) |
+| `SSH3_MAX_PASSWORD_FAILURES` | `10` | Fehlgeschlagene Passwortversuche vor der Kontosperrung |
+| `SSH3_PASSWORD_LOCKOUT_SECONDS` | `60` | Dauer der Passwort-Brute-Force-Sperre in Sekunden |
 | `LANG` | `C.UTF-8` | Locale, die an Benutzer-Shells weitergereicht wird |
 
 Änderungen anwenden: `sudo systemctl restart ssh3-server`.

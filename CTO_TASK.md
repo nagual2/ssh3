@@ -159,7 +159,12 @@ per-exec time ≤ 30% of the cold path; without: 100 handshakes. No new dependen
 
 ## 7. Stage 4 — Hardening & ecosystem (P3)
 
-1. External security review checklist: token replay across conversations (jti binding exists — prove it), header injection in CONNECT, QUIC amplification, DoS limits per conversation (MaxStartups analog), brute-force lockout.
+1. External security review checklist — **done 2026-10-05, except the external review itself (that is ROADMAP R2, on the frozen code)**:
+   - **MaxStartups analog**: conversations between the CONNECT and the auth verdict hold one of `-max-unauth-conversations` / `SSH3_MAX_UNAUTH_CONVERSATIONS` slots (default 100); over the cap the request is refused with 503 before any identity work (`server_auth/dos_guard.go`, TDD).
+   - **Brute-force lockout**: failed password authentications book per user, `-max-password-failures` (default 10) locks the account out of the password backend for `-password-lockout-seconds` (default 60, refused with 429 without touching shadow), success clears, lockout is per user (`server_auth/dos_guard.go`, TDD).
+   - **Token replay (jti binding) proven**: the pubkey verifier requires the jti claim to equal the base64 conversation ID; a regression test mints a valid ed25519 token for conversation A and verifies acceptance on A and refusal on B (and on a mismatching jti) (`server_plugin_test.go`). The OIDC path binds the conversation via the nonce check (`auth/oidc`).
+   - **Header injection in CONNECT: verified, no vector** — the request-controlled values (URL user/query user, user-agent) never reach response headers: the Server header is a fixed version string, `http.Error` writes the body only, h3 field parsing rejects control characters on the wire, and a malformed username fails `unix_util.GetUser` before any path use. The residual log-forging risk is neutralized by the JSON journald logging.
+   - **QUIC amplification: verified bounded** — quic-go enforces the RFC 9000 section 8.1 3× anti-amplification limit with no configuration knob to disable it, and the auth phase rejects 0-RTT data with 425 before identity work (`server_auth/auth.go`), so early-data replay cannot carry authentication.
 2. PAM-based password auth (replace direct shadow reading; enables non-root servers and 2FA).
 3. FIDO2/hardware keys (`ed25519-sk` semantics), SSH certificate authority model.
 4. Packaging: distro packages (deb/rpm), release pipeline without third-party toolchain downloads (current upstream release CI pulls musl toolchain from musl.cc — replace with reproducible local builds).

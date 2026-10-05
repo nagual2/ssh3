@@ -953,7 +953,26 @@ func ServerMain() int {
 		maxReverseForwards = envMax
 	}
 	flag.IntVar(&maxReverseForwards, "max-reverse-forwards", maxReverseForwards, "maximum active reverse (-R) listeners per user (SSH3_MAX_REVERSE_FORWARDS sets it too)")
+	maxUnauthConversations := 100
+	if envMax, err := strconv.Atoi(os.Getenv("SSH3_MAX_UNAUTH_CONVERSATIONS")); err == nil {
+		maxUnauthConversations = envMax
+	}
+	flag.IntVar(&maxUnauthConversations, "max-unauth-conversations", maxUnauthConversations, "maximum conversations sitting unauthenticated before refusals (the MaxStartups analog; SSH3_MAX_UNAUTH_CONVERSATIONS sets it too)")
+	maxPasswordFailures := 10
+	if envMax, err := strconv.Atoi(os.Getenv("SSH3_MAX_PASSWORD_FAILURES")); err == nil {
+		maxPasswordFailures = envMax
+	}
+	flag.IntVar(&maxPasswordFailures, "max-password-failures", maxPasswordFailures, "failed password attempts before the account lockout (SSH3_MAX_PASSWORD_FAILURES sets it too)")
+	passwordLockoutSeconds := 60
+	if envSecs, err := strconv.Atoi(os.Getenv("SSH3_PASSWORD_LOCKOUT_SECONDS")); err == nil {
+		passwordLockoutSeconds = envSecs
+	}
+	flag.IntVar(&passwordLockoutSeconds, "password-lockout-seconds", passwordLockoutSeconds, "password brute-force lockout duration in seconds (SSH3_PASSWORD_LOCKOUT_SECONDS sets it too)")
 	flag.Parse()
+
+	server_auth.MaxUnauthenticatedConversations = maxUnauthConversations
+	server_auth.MaxPasswordAuthFailures = maxPasswordFailures
+	server_auth.PasswordLockoutDuration = time.Duration(passwordLockoutSeconds) * time.Second
 
 	if policy, err := parseGatewayPorts(gatewayPorts); err != nil {
 		fmt.Fprintf(os.Stderr, "the -gateway-ports/SSH3_GATEWAY_PORTS value is invalid: %v\n", err)

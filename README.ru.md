@@ -55,6 +55,9 @@ sudo dpkg -i ssh3_0.1.22_amd64.deb
 | `SSH3_LOG_LEVEL` | `info` | Уровень логирования (`trace`, `debug`, `info`, `warn`, `error`) |
 | `SSH3_GATEWAY_PORTS` | `no` | Политика GatewayPorts для обратного (-R) форвардинга: `no` принудительно возвращает запрошенные не-loopback бинды на loopback, `clientspecified` чтит запрошенный адрес, `yes` биндит wildcard |
 | `SSH3_MAX_REVERSE_FORWARDS` | `10` | Максимум активных -R-слушателей на пользователя |
+| `SSH3_MAX_UNAUTH_CONVERSATIONS` | `100` | Максимум конверсаций в неаутентифицированной фазе до отказов (DoS-защита) |
+| `SSH3_MAX_PASSWORD_FAILURES` | `10` | Неудачных парольных попыток до блокировки аккаунта |
+| `SSH3_PASSWORD_LOCKOUT_SECONDS` | `60` | Длительность блокировки от брутфорса пароля, секунды |
 | `LANG` | `C.UTF-8` | Локаль, пробрасываемая в шеллы пользователей |
 
 Применение изменений: `sudo systemctl restart ssh3-server`.
