@@ -61,7 +61,13 @@
 
 **Impact**
 
-`make([]byte, 2^62-1)` converts to a negative `int` → `panic: runtime error: makeslice: len out of range`. Nothing in the Go tree recovers (`git grep 'recover()' -- '*.go' ':!vendor'` → no hits), and the channel-accept loop runs in an unprotected goroutine (`server.go:91-110` spawned from `cmd/ssh3-server.go:1369`, itself in a bare `go func()` with no recover). Result: **the whole `ssh3-server` (or `ssh3` client) process exits**. Lengths below Go's `maxAlloc` but huge (e.g. 2^40, still encodable) instead attempt the allocation → the process is OOM-killed. Either way a remote, repeatable, unauthenticated-with-one-credential DoS; it is also a reliable crash primitive that masks other bugs.
+`make([]byte, 2^62-1)` converts to a negative `int` → `panic: runtime error: makeslice: len out of range`. Nothing in the Go tree recovers (`git grep 'recover()' -- '*.go' ':!vendor'` → no hits), and the channel-accept loop runs in an unprotected goroutine (`server.go:91-110` spawned from `cmd/ssh3-server.go:1369`, itself in a bare `go func()` with no recover). Result: **the whole `ssh3-server` (or `ssh3` client) process exits**. Either way a remote, repeatable DoS (authenticated on the server, server-driven against the client); it is also a reliable crash primitive that masks other bugs.
+
+**Locally confirmed (read-only probe, `go1.26.0`, no network):** a 12-line program calling the real `util.ParseSSHString` on a `bytes.Reader` carrying only the 8-byte varint was run against the audited tree:
+- length `2^62-1` (max varint) → `PANIC: runtime error: makeslice: len out of range` — raised **inside `ParseSSHString`**, on the `make` at `util/wire.go:209`, with zero input bytes supplied by the peer beyond the varint itself.
+- length `2^40` (1 TiB, comfortably below Go's `maxAlloc`) → `fatal error: runtime: out of memory` from `runtime.sysMapOS`/`mheap.grow`. A **fatal** runtime error is not catchable by `recover()` — the process dies even with a panic handler installed. This is the more dangerous variant, and 8 bytes of attacker input reach it.
+
+So the finding is not theoretical: 8 bytes on a channel stream → server or client process death.
 
 **Recommendation**
 
@@ -226,7 +232,7 @@ Each item was checked specifically; "clean" means the code holds up for the stat
 ## Limitations
 
 - **Report-only, no dynamic exploitation.** Nothing was run against a live server; no network peer was ever attacked. Findings F-01…F-06, F-08 are static-analysis conclusions.
-- **Dynamic probing was only partially possible.** The image ships no Go toolchain; a `go1.26.0` toolchain was recovered from the module cache and used for read-only local probes of parser behaviour. Any claim marked "static" was *not* executed. No fuzzing campaign was run (the message parser has no fuzz target in-tree).
+- **Dynamic probing was only partially possible.** The image ships no Go toolchain; a `go1.26.0` toolchain was recovered from the module cache and used for read-only local probes of parser behaviour. The probe of `util.ParseSSHString` (see F-01) was executed and reproduced both the `makeslice` panic and an unrecoverable `fatal error: runtime: out of memory`. Everything else marked "static" was *not* executed end-to-end: no server was started, no fuzzing campaign was run (the message parser has no fuzz target in-tree).
 - **No `recover()`-reachability proof by execution.** The "panic ⇒ process death" reasoning is Go language semantics plus a verified absence of `recover()` in the Go tree and in the `ServeQUICConn` goroutine (`cmd/ssh3-server.go:1355-1372`), not a live crash demonstration.
 - **Rust workspace not triaged line by line.** 16 `unsafe` sites and ~874 `.unwrap()` calls exist in `crates/*/src`; the highest-density files are `crates/ssh3-client/src/lib.rs` (~502), `crates/ssh3-server/src/lib.rs` (~135), `crates/ssh3-h3/src/lib.rs` (~88), `crates/ssh3-quinn/src/channel.rs` (~61), `crates/ssh3-auth/src/lib.rs` (~30). The `unsafe` blocks cluster around TTY/ioctl handling (`ssh3-client/src/lib.rs:147,563-601`), process signalling (`:2393-2491`), and the shadow/`crypt(3)` FFI password backend (`ssh3-server/src/lib.rs:312-383`) — that last one parses a shadow entry with `CStr::from_ptr` and is the one I would fuzz next, since it feeds attacker-supplied password bytes into `crypt`. **Treat the Rust side as only partially covered.**
 - **No Windows-path review.** `cmd/window_change_windows.go`, `client/signals_windows.go`, `util/unix_util` Windows files, and the Windows build path were not audited.
