@@ -137,7 +137,7 @@ func runFileTransfer(client *client.Client, target transferTarget, localPath str
 		return -1
 	}
 	rwc := ssh3.NewChannelReadWriteCloser(channel)
-	sftpClient, err := sftp.NewClientPipe(rwc, rwc)
+	sftpClient, err := sftp.NewClientPipe(rwc, rwc, sftp.UseConcurrentWrites(true))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "could not start sftp client: %+v\n", err)
 		channel.Close()
@@ -182,6 +182,14 @@ func sftpMkdirAll(sftpClient *sftp.Client, remoteDir string) error {
 	return nil
 }
 
+// sftpTreeWorkers is the pipeline depth of the recursive transfers: files
+// are pushed without waiting for the previous file's confirmation. SFTP
+// requests are id-multiplexed over the channel, the server's RequestServer
+// worker pool processes them concurrently, and CLOSE still waits for its own
+// file's writes — so per-file confirmations and integrity hold while the
+// client never stalls on a round-trip between files.
+const sftpTreeWorkers = 16
+
 func uploadDir(sftpClient *sftp.Client, localRoot, remoteRoot string, resumeMode, verifyChecksum bool) int {
 	info, err := os.Stat(localRoot)
 	if err != nil {
@@ -197,41 +205,60 @@ func uploadDir(sftpClient *sftp.Client, localRoot, remoteRoot string, resumeMode
 		return -1
 	}
 	progress := newTransferProgress("upload", localRoot, -1)
-	var failures int
-	err = filepath.WalkDir(localRoot, func(current string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+	files := make(chan string)
+	var wg sync.WaitGroup
+	var failures atomic.Int64
+	worker := func() {
+		defer wg.Done()
+		for localPath := range files {
+			relative, err := filepath.Rel(localRoot, localPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "cannot relativize %s: %s\n", localPath, err)
+				failures.Add(1)
+				continue
+			}
+			remotePath := path.Join(remoteRoot, filepath.ToSlash(relative))
+			progress.rename(path.Base(localPath))
+			if code := uploadFileInTree(sftpClient, localPath, remotePath, resumeMode, verifyChecksum, progress); code != 0 {
+				failures.Add(1)
+			}
+		}
+	}
+	for i := 0; i < sftpTreeWorkers; i++ {
+		wg.Add(1)
+		go worker()
+	}
+	// the walk itself is local and fast: it creates the remote directories on
+	// the way and feeds the workers, then closes the pipeline
+	walkErr := filepath.WalkDir(localRoot, func(current string, entry fs.DirEntry, callbackErr error) error {
+		if callbackErr != nil {
+			return callbackErr
 		}
 		relative, err := filepath.Rel(localRoot, current)
 		if err != nil {
 			return err
 		}
-		remotePath := path.Join(remoteRoot, filepath.ToSlash(relative))
 		if entry.IsDir() {
 			if current == localRoot {
 				return nil
 			}
-			if err := sftpMkdirAll(sftpClient, remotePath); err != nil {
-				return err
-			}
-			return nil
+			return sftpMkdirAll(sftpClient, path.Join(remoteRoot, filepath.ToSlash(relative)))
 		}
 		if !entry.Type().IsRegular() {
 			return nil
 		}
-		progress.rename(path.Base(current))
-		if code := uploadFile(sftpClient, current, remotePath, resumeMode, verifyChecksum); code != 0 {
-			failures++
-		}
+		files <- current
 		return nil
 	})
+	close(files)
+	wg.Wait()
 	progress.finish()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "upload walk failed: %s\n", err)
+	if walkErr != nil {
+		fmt.Fprintf(os.Stderr, "upload walk failed: %s\n", walkErr)
 		return -1
 	}
-	if failures > 0 {
-		fmt.Fprintf(os.Stderr, "upload finished with %d failed file(s)\n", failures)
+	if failed := failures.Load(); failed > 0 {
+		fmt.Fprintf(os.Stderr, "upload finished with %d failed file(s)\n", failed)
 		return -1
 	}
 	return 0
@@ -252,37 +279,61 @@ func downloadDir(sftpClient *sftp.Client, remoteRoot, localRoot string, resumeMo
 		return -1
 	}
 	progress := newTransferProgress("download", remoteRoot, -1)
-	var failures int
-	walker := sftpClient.Walk(remoteRoot)
-	for walker.Step() {
-		if walker.Err() != nil {
-			fmt.Fprintf(os.Stderr, "walk error at %s: %s\n", walker.Path(), walker.Err())
-			failures++
-			continue
-		}
-		relative, err := filepath.Rel(remoteRoot, walker.Path())
-		if err != nil {
-			continue
-		}
-		localPath := filepath.Join(localRoot, filepath.FromSlash(relative))
-		if walker.Stat().IsDir() {
-			if err := os.MkdirAll(localPath, 0o755); err != nil {
-				fmt.Fprintf(os.Stderr, "cannot create %s: %s\n", localPath, err)
-				failures++
+	type treeFile struct {
+		remote, relative string
+		size             int64
+	}
+	files := make(chan treeFile)
+	var wg sync.WaitGroup
+	var failures atomic.Int64
+	worker := func() {
+		defer wg.Done()
+		for entry := range files {
+			localPath := filepath.Join(localRoot, filepath.FromSlash(entry.relative))
+			progress.rename(path.Base(localPath))
+			if code := downloadFileInTree(sftpClient, entry.remote, localPath, entry.size, resumeMode, verifyChecksum, progress); code != 0 {
+				failures.Add(1)
 			}
-			continue
-		}
-		if !walker.Stat().Mode().IsRegular() {
-			continue
-		}
-		progress.rename(filepath.Base(localPath))
-		if code := downloadFileTo(sftpClient, walker.Path(), localPath, resumeMode, verifyChecksum); code != 0 {
-			failures++
 		}
 	}
+	for i := 0; i < sftpTreeWorkers; i++ {
+		wg.Add(1)
+		go worker()
+	}
+	// the walk enumerates the remote tree (ReadDir round-trips, serial by
+	// nature) in a producer goroutine while the workers download
+	var walkFailures atomic.Int64
+	go func() {
+		defer close(files)
+		walker := sftpClient.Walk(remoteRoot)
+		for walker.Step() {
+			if walker.Err() != nil {
+				fmt.Fprintf(os.Stderr, "walk error at %s: %s\n", walker.Path(), walker.Err())
+				walkFailures.Add(1)
+				continue
+			}
+			relative, err := filepath.Rel(remoteRoot, walker.Path())
+			if err != nil {
+				continue
+			}
+			localPath := filepath.Join(localRoot, filepath.FromSlash(relative))
+			if walker.Stat().IsDir() {
+				if err := os.MkdirAll(localPath, 0o755); err != nil {
+					fmt.Fprintf(os.Stderr, "cannot create %s: %s\n", localPath, err)
+					walkFailures.Add(1)
+				}
+				continue
+			}
+			if !walker.Stat().Mode().IsRegular() {
+				continue
+			}
+			files <- treeFile{remote: walker.Path(), relative: relative, size: walker.Stat().Size()}
+		}
+	}()
+	wg.Wait()
 	progress.finish()
-	if failures > 0 {
-		fmt.Fprintf(os.Stderr, "download finished with %d failed file(s)\n", failures)
+	if failed := walkFailures.Load() + failures.Load(); failed > 0 {
+		fmt.Fprintf(os.Stderr, "download finished with %d failed file(s)\n", failed)
 		return -1
 	}
 	return 0
@@ -463,6 +514,127 @@ func uploadFile(sftpClient *sftp.Client, localPath, remotePath string, resumeMod
 	if verifyChecksum || info.Size() > checksumAutoThreshold {
 		if !verifyRemoteChecksum(sftpClient, remotePath, localHasher) {
 			fmt.Fprintf(os.Stderr, "checksum mismatch after upload of %s\n", remotePath)
+			return -1
+		}
+		fmt.Fprintf(os.Stderr, "[ssh3 -f] checksum ok: %s\n", remotePath)
+	}
+	return 0
+}
+
+// uploadFileInTree is the recursive-transfer fast path: the walk has already
+// created every directory, so the per-file round-trips shrink to the SFTP
+// minimum — OPEN, the data writes, CLOSE (whose status confirms the file's
+// writes). The scp-style dir-target Stat, the parent-dir Stat/Mkdir and the
+// post-upload size Stat of uploadFile are dropped from the hot path;
+// --checksum and the automatic big-file threshold still re-read when asked.
+func uploadFileInTree(sftpClient *sftp.Client, localPath, remotePath string, resumeMode, verifyChecksum bool, progress *transferProgress) int {
+	info, err := os.Stat(localPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot stat %s: %s\n", localPath, err)
+		return -1
+	}
+	openFlags := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	var startOffset int64
+	if resumeMode {
+		if remoteInfo, err := sftpClient.Stat(remotePath); err == nil {
+			switch {
+			case remoteInfo.Size() > info.Size():
+				fmt.Fprintf(os.Stderr, "remote %s is larger than local (%d > %d bytes); remove it or drop --continue\n",
+					remotePath, remoteInfo.Size(), info.Size())
+				return -1
+			case remoteInfo.Size() == info.Size():
+				fmt.Fprintf(os.Stderr, "%s is already fully uploaded, skipping\n", remotePath)
+				return 0
+			default:
+				startOffset = remoteInfo.Size()
+				openFlags = os.O_WRONLY // append via absolute writes from startOffset
+			}
+		}
+	}
+	localFile, err := os.Open(localPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot open %s: %s\n", localPath, err)
+		return -1
+	}
+	defer localFile.Close()
+	remoteFile, err := sftpClient.OpenFile(remotePath, openFlags)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot create remote file %s: %s\n", remotePath, err)
+		return -1
+	}
+	defer remoteFile.Close()
+	localHasher := sha256.New()
+	var reader io.Reader = localFile
+	if startOffset > 0 {
+		if _, err := localFile.Seek(startOffset, io.SeekStart); err != nil {
+			fmt.Fprintf(os.Stderr, "cannot resume %s: %s\n", localPath, err)
+			return -1
+		}
+		reader = io.NewSectionReader(localFile, startOffset, info.Size()-startOffset)
+		hashResumePrefix(sftpClient, remotePath, startOffset, localHasher)
+	}
+	if _, err := copyWithOffset(remoteFile, reader, progress.addBytes, localHasher, startOffset); err != nil {
+		fmt.Fprintf(os.Stderr, "upload failed: %s\n", err)
+		return -1
+	}
+	if verifyChecksum || info.Size() > checksumAutoThreshold {
+		if !verifyRemoteChecksum(sftpClient, remotePath, localHasher) {
+			fmt.Fprintf(os.Stderr, "checksum mismatch after upload of %s\n", remotePath)
+			return -1
+		}
+		fmt.Fprintf(os.Stderr, "[ssh3 -f] checksum ok: %s\n", remotePath)
+	}
+	return 0
+}
+
+// downloadFileInTree is the recursive-transfer fast path: the walk already
+// carries the entry size, so the per-file remote Stat disappears — OPEN, the
+// reads, CLOSE carry the transfer.
+func downloadFileInTree(sftpClient *sftp.Client, remotePath, localPath string, size int64, resumeMode, verifyChecksum bool, progress *transferProgress) int {
+	openFlags := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	var startOffset int64
+	if resumeMode {
+		if localInfo, err := os.Stat(localPath); err == nil {
+			switch {
+			case localInfo.Size() > size:
+				fmt.Fprintf(os.Stderr, "local %s is larger than remote (%d > %d bytes); remove it or drop --continue\n",
+					localPath, localInfo.Size(), size)
+				return -1
+			case localInfo.Size() == size:
+				fmt.Fprintf(os.Stderr, "%s is already fully downloaded, skipping\n", localPath)
+				return 0
+			default:
+				startOffset = localInfo.Size()
+				openFlags = os.O_WRONLY
+			}
+		}
+	}
+	localFile, err := os.OpenFile(localPath, openFlags, 0o644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot create %s: %s\n", localPath, err)
+		return -1
+	}
+	defer localFile.Close()
+	remoteFile, err := sftpClient.Open(remotePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot open remote file %s: %s\n", remotePath, err)
+		return -1
+	}
+	defer remoteFile.Close()
+	localHasher := sha256.New()
+	if startOffset > 0 {
+		if prefixFile, err := os.Open(localPath); err == nil {
+			io.Copy(localHasher, io.NewSectionReader(prefixFile, 0, startOffset))
+			prefixFile.Close()
+		}
+	}
+	if _, err := io.Copy(io.MultiWriter(localFile, localHasher), progress.wrapReader(remoteFile)); err != nil {
+		fmt.Fprintf(os.Stderr, "download failed: %s\n", err)
+		return -1
+	}
+	if verifyChecksum || size > checksumAutoThreshold {
+		if !verifyRemoteChecksum(sftpClient, remotePath, localHasher) {
+			fmt.Fprintf(os.Stderr, "checksum mismatch after download of %s\n", remotePath)
 			return -1
 		}
 		fmt.Fprintf(os.Stderr, "[ssh3 -f] checksum ok: %s\n", remotePath)

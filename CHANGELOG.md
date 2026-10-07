@@ -10,6 +10,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); eac
 - **The repository is renamed to [`nagual2/ssh3-go`](https://github.com/nagual2/ssh3-go)**: the fork is now a daily-driver Go client/server next to the C rewrite, and the name says so. GitHub redirects the old `nagual2/ssh3` URLs (web and git), and the Go module path stays `github.com/francoismichel/ssh3` — imports are unaffected.
 - **Packages are renamed: the deb/ar archives and the deb package are now `ssh3-go`** (`.goreleaser.yaml` `project_name`/`package_name`); the `ssh3-go` deb declares Conflicts/Replaces on `ssh3`, so an existing install migrates in place by installing the new package (or `dpkg -i ssh3-go_*.deb` directly). Binaries (`ssh3`, `ssh3-server`), the `ssh3-server.service` unit and `/etc/ssh3` configuration keep their names — scripts and systemd overrides are unaffected.
 
+## Unreleased
+
+### Added
+- **Recursive `-f` transfers pipeline files instead of round-tripping them** (`cmd/sftp_client.go`, `cmd/sftp_client_test.go`): the tree walk used to push one file at a time and wait for every CLOSE, at ~5 SFTP round-trips per file — 78 files/s on a LAN. `uploadDir`/`downloadDir` now run a 16-worker pipeline over one channel: SFTP requests are id-multiplexed, the server's RequestServer worker pool processes them concurrently, and each CLOSE still waits only for its own file's writes, so per-file confirmations and failure accounting hold. The recursive fast path also drops the three per-file Stats the walk makes redundant (dir-target check, parent auto-mkdir check, post-upload size verify — CLOSE carries the final write status; `--checksum` and the big-file threshold still re-read), and the client enables `UseConcurrentWrites` for chunk pipelining inside big files. Measured on the 0.1.27 LAN stand: 2000 x 2 KiB files, upload 25.9 s -> 1.3 s (x20, ~1500 files/s), download 2.1 s, all byte-exact. Process-level sharding (`-f -r` per subtree in parallel) composes on top for very large trees.
+
 ## [0.1.27] - 2026-10-07
 
 ### Added
