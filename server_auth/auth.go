@@ -21,14 +21,20 @@ func HandleAuths(ctx context.Context, enablePasswordLogin bool, defaultMaxPacket
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Server", ssh3.GetCurrentVersionString())
-		peerVersion, err := ssh3.ParseVersionString(r.UserAgent())
-		log.Debug().Msgf("received request from User-Agent %s", r.UserAgent())
-		log.Debug().Msgf("peer version: protocol version %s, software version %s", peerVersion.GetProtocolVersion(), peerVersion.GetSoftwareVersion())
-		// currently apply strict version rules
+		ua := r.UserAgent()
+		peerVersion, err := ssh3.ParseVersionString(ua)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("Unsupported user-agent: %s", r.UserAgent()[:100]), http.StatusForbidden)
+			// a short unparseable User-Agent must not slice out of bounds:
+			// quic-go recovers the panic, but every bogus CONNECT then costs a
+			// 64 KiB stack trace in the log
+			if len(ua) > 100 {
+				ua = ua[:100]
+			}
+			http.Error(w, fmt.Sprintf("Unsupported user-agent: %s", ua), http.StatusForbidden)
 			return
 		}
+		log.Debug().Msgf("received request from User-Agent %s", ua)
+		log.Debug().Msgf("peer version: protocol version %s, software version %s", peerVersion.GetProtocolVersion(), peerVersion.GetSoftwareVersion())
 		if !ssh3.IsVersionSupported(peerVersion) {
 			http.Error(w, fmt.Sprintf("Unsupported version: %s not supported by server with version %s", peerVersion.GetProtocolVersion(), ssh3.ThisVersion().GetProtocolVersion()), http.StatusForbidden)
 			return
@@ -52,6 +58,21 @@ func HandleAuths(ctx context.Context, enablePasswordLogin bool, defaultMaxPacket
 			w.WriteHeader(http.StatusTooEarly)
 			return
 		}
+
+		// the unauthenticated phase holds a DoS slot (the MaxStartups
+		// analog): the slot is acquired before any per-request work worth
+		// protecting (conversation allocation, user lookup, identity-file
+		// reads) and is always released when the auth phase ends, whatever
+		// the verdict — the slot must never survive a successful
+		// authentication, or 100 logins brick the whole server with 503s
+		if !TryAcquireUnauthenticatedConversation() {
+			log.Warn().Msgf("too many unauthenticated conversations (%d active), refusing the request for user %s",
+				MaxUnauthenticatedConversations, r.URL.User.Username())
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		defer ReleaseUnauthenticatedConversation()
+
 		str := w.(http3.HTTPStreamer).HTTPStream()
 		// The conversation context must derive from the QUIC connection's:
 		// when the connection dies without an application-level close (client
@@ -83,29 +104,12 @@ func HandleAuths(ctx context.Context, enablePasswordLogin bool, defaultMaxPacket
 			return
 		}
 
-		// the unauthenticated phase holds a DoS slot (the MaxStartups
-		// analog): from the conversation creation to the auth verdict, the
-		// slot returns on every refusal and on success stays for the talk
-		if !TryAcquireUnauthenticatedConversation() {
-			log.Warn().Msgf("too many unauthenticated conversations (%d active), refusing the request for user %s",
-				MaxUnauthenticatedConversations, username)
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		authenticated := false
-		defer func() {
-			if !authenticated {
-				ReleaseUnauthenticatedConversation()
-			}
-		}()
-
 		// first, handle the HTTP request verifiers (often plugins)
 		for _, abstractVerifier := range identityVerifiers {
 			switch verifier := abstractVerifier.(type) {
 			case *WrappedPluginVerifier:
 				if verifier.Verify(r, base64ConvID) {
 					log.Debug().Msgf("request for user %s successfully verified by plugin", username)
-					authenticated = true
 					handlerFunc(username, conv, w, r)
 					return
 				}
@@ -117,13 +121,11 @@ func HandleAuths(ctx context.Context, enablePasswordLogin bool, defaultMaxPacket
 		authorization := r.Header.Get("Authorization")
 		if enablePasswordLogin && strings.HasPrefix(authorization, "Basic ") {
 			if CheckBasicAuth(username, w, r) {
-				authenticated = true
 				handlerFunc(username, conv, w, r)
 			}
 			return
 		} else if strings.HasPrefix(authorization, "Bearer ") {
 			if VerifyJWT(identityVerifiers, base64ConvID, w, r) {
-				authenticated = true
 				handlerFunc(username, conv, w, r)
 			}
 			return
