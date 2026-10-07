@@ -270,6 +270,7 @@ func (s *Server) GetHTTPHandlerFunc(ctx context.Context) AuthenticatedHandlerFun
 			)
 
 			go func() {
+				defer util.PanicGuard("server.go:272")()
 				// TODO: this hijacks the datagrams for the whole quic connection, so the server
 				//		 currently does not work for several conversations in the same QUIC connection
 				for {
@@ -303,6 +304,7 @@ func (s *Server) GetHTTPHandlerFunc(ctx context.Context) AuthenticatedHandlerFun
 				}
 			}()
 			go func() {
+				defer util.PanicGuard("server.go:305")()
 				defer newConv.Close()
 				defer conversationsManager.removeConversation(newConv)
 				defer s.removeConnection(qconn)

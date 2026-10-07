@@ -406,6 +406,7 @@ func (f *dynamicForwarder) acceptLoop() {
 		}
 		f.connections.Add(1)
 		go func() {
+			defer util.PanicGuard("cmd/dynamic_forward.go:408")()
 			defer f.connections.Done()
 			f.serveSOCKSConnection(conn)
 		}()
@@ -536,11 +537,13 @@ func socks5ReplyCodeForServerError(message string) uint8 {
 func pumpDynamicForward(remote io.Reader, local io.Writer, stream io.ReadWriteCloser) {
 	results := make(chan error, 2)
 	go func() {
+		defer util.PanicGuard("cmd/dynamic_forward.go:538")()
 		_, err := io.Copy(stream, remote)
 		closeWrite(stream)
 		results <- err
 	}()
 	go func() {
+		defer util.PanicGuard("cmd/dynamic_forward.go:543")()
 		_, err := io.Copy(local, stream)
 		closeWrite(local)
 		results <- err

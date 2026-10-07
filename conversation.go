@@ -98,6 +98,7 @@ func (c *Conversation) EstablishClientConversation(req *http.Request, qconn *qui
 	rawConn := transport.NewRawClientConn(qconn)
 	connCtx := qconn.Context()
 	go func() {
+		defer util.PanicGuard("conversation.go:100")()
 		for {
 			str, err := qconn.AcceptUniStream(connCtx)
 			if err != nil {
@@ -112,6 +113,7 @@ func (c *Conversation) EstablishClientConversation(req *http.Request, qconn *qui
 	// whole connection with STREAM_CREATION_ERROR on any server-initiated
 	// bidirectional stream.
 	go func() {
+		defer util.PanicGuard("conversation.go:114")()
 		for {
 			str, err := qconn.AcceptStream(connCtx)
 			if err != nil {
@@ -206,6 +208,7 @@ func (c *Conversation) EstablishClientConversation(req *http.Request, qconn *qui
 		c.messageSender = qconn
 		c.context, c.cancelContext = context.WithCancelCause(qconn.Context())
 		go func() {
+			defer util.PanicGuard("conversation.go:208")()
 			// TODO: this hijacks the datagrams for the whole quic connection, so the server
 			//		 currently does not work for several conversations in the same QUIC connection
 
@@ -508,6 +511,7 @@ func (c *Conversation) SetMultiplexed() {
 	}
 	if qconn, ok := c.streamCreator.(*quic.Conn); ok {
 		go func() {
+			defer util.PanicGuard("conversation.go:510")()
 			<-qconn.Context().Done()
 			c.Close()
 		}()

@@ -18,6 +18,7 @@ import (
 	"net"
 	"os"
 	"path"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -353,4 +354,16 @@ func (m *SyncMap[K, V]) Get(key K) (V, bool) {
 
 func (m *SyncMap[K, V]) Insert(key K, val V) {
 	m.inner.Store(key, val)
+}
+
+// PanicGuard returns a func suitable for `defer` that turns a panic into an
+// error log entry. The QUIC-facing goroutines parse peer-controlled bytes;
+// a panic in any of them must take down the offending stream or connection,
+// never the whole process.
+func PanicGuard(scope string) (deferred func()) {
+	return func() {
+		if r := recover(); r != nil {
+			log.Error().Msgf("%s: recovered from panic: %v\n%s", scope, r, debug.Stack())
+		}
+	}
 }

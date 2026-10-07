@@ -88,6 +88,7 @@ func forwardAgent(parent context.Context, channel ssh3.Channel) error {
 	defer c.Close()
 	ctx, cancel := context.WithCancelCause(parent)
 	go func() {
+		defer util.PanicGuard("client/client.go:90")()
 		var err error = nil
 		var genericMessage ssh3Messages.Message
 		for {
@@ -156,6 +157,7 @@ func forwardAgent(parent context.Context, channel ssh3.Channel) error {
 
 func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net.TCPConn) {
 	go func() {
+		defer util.PanicGuard("client/client.go:158")()
 		defer conn.CloseWrite()
 		for {
 			select {
@@ -196,6 +198,7 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 	}()
 
 	go func() {
+		defer util.PanicGuard("client/client.go:198")()
 		defer channel.Close()
 		defer conn.CloseRead()
 		buf := make([]byte, channel.MaxPacketSize())
@@ -469,6 +472,7 @@ func (c *Client) ForwardUDP(ctx context.Context, localUDPAddr *net.UDPAddr, remo
 	}
 	forwardings := make(map[string]ssh3.Channel)
 	go func() {
+		defer util.PanicGuard("client/client.go:471")()
 		buf := make([]byte, 1500)
 		for {
 			n, addr, err := conn.ReadFromUDP(buf)
@@ -486,6 +490,7 @@ func (c *Client) ForwardUDP(ctx context.Context, localUDPAddr *net.UDPAddr, remo
 				forwardings[addr.String()] = channel
 
 				go func() {
+					defer util.PanicGuard("client/client.go:488")()
 					for {
 						dgram, err := channel.ReceiveDatagram(ctx)
 						if err != nil {
@@ -518,6 +523,7 @@ func (c *Client) ForwardTCP(ctx context.Context, localTCPAddr *net.TCPAddr, remo
 		return nil, err
 	}
 	go func() {
+		defer util.PanicGuard("client/client.go:520")()
 		for {
 			conn, err := conn.AcceptTCP()
 			if err != nil {

@@ -160,6 +160,7 @@ func getReverseForwardState(conv *ssh3.Conversation) *reverseForwardState {
 	state := &reverseForwardState{conv: conv}
 	reverseForwardStates[conv] = state
 	go func() {
+		defer util.PanicGuard("cmd/reverse_forward_server.go:162")()
 		<-conv.Context().Done()
 		reverseForwardStatesMu.Lock()
 		delete(reverseForwardStates, conv)
@@ -350,6 +351,7 @@ func serveReverseTCP(ctx context.Context, state *reverseForwardState, listener *
 		}
 		state.openChannels.Add(1)
 		go func() {
+			defer util.PanicGuard("cmd/reverse_forward_server.go:352")()
 			defer state.openChannels.Add(-1)
 			forwardTCPInBackground(ctx, channel, conn)
 		}()
@@ -389,6 +391,7 @@ func serveReverseUDP(ctx context.Context, state *reverseForwardState, conn *net.
 			state.openChannels.Add(1)
 			channels[key] = channel
 			go func(from *net.UDPAddr, channel ssh3.Channel) {
+				defer util.PanicGuard("cmd/reverse_forward_server.go:391")()
 				defer state.openChannels.Add(-1)
 				defer delete(channels, from.String())
 				for {

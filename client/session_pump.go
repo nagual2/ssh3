@@ -12,6 +12,7 @@ import (
 	"time"
 
 	ssh3Messages "github.com/francoismichel/ssh3/message"
+	"github.com/francoismichel/ssh3/util"
 	"github.com/rs/zerolog/log"
 )
 
@@ -85,6 +86,7 @@ func pumpSessionStreams(channel sessionChannel, sio sessionIO, ptyRequested bool
 	}
 
 	go func() {
+		defer util.PanicGuard("client/session_pump.go:87")()
 		defer close(pumpDone)
 		buf := make([]byte, channel.MaxPacketSize())
 		for {
