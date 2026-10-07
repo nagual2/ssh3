@@ -11,21 +11,43 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/francoismichel/ssh3"
+	"github.com/francoismichel/ssh3/util"
 	"github.com/francoismichel/ssh3/util/unix_util"
 	"github.com/pkg/sftp"
 	"github.com/rs/zerolog/log"
 )
 
 // File-transfer subsystem: serves pkg/sftp over an ssh3 channel, jailed to
-// the session user's home directory. The server process may run as root, so
-// every path is resolved inside the jail and every created inode is chowned
-// back to the user.
+// the session user's home directory.
+//
+// Two isolation modes (-sftp-jail):
+//
+//   - "chroot" (default, the sshd model): this network-facing process never
+//     touches user paths at all — it re-execs itself as a short-lived child
+//     that chroots into the user's home and drops to the user's uid/gid
+//     before the first path is opened. Path confinement is the kernel's:
+//     after chroot, absolute symlinks and ".." cannot reach outside.
+//   - "lexical": the historical in-process jail. Paths are mapped with a
+//     lexical prefix check only; whatever the server process can open, an
+//     authenticated user can reach through a symlink. Only sensible when the
+//     server holds no privileges worth abusing (it runs as an unprivileged
+//     single user, or the operator has accepted the risk explicitly).
+
+const (
+	sftpJailChroot  = "chroot"
+	sftpJailLexical = "lexical"
+)
+
+// sftpJailMode is set from -sftp-jail / SSH3_SFTP_JAIL in ServerMain.
+var sftpJailMode = sftpJailChroot
 
 // SFTP v3 open flags (private in pkg/sftp; SSH_FXF_* from the wire spec).
 const (
@@ -42,25 +64,105 @@ type sftpHandlers struct {
 	root string
 }
 
-func newSFTPHandlers(user *unix_util.User) (*sftpHandlers, error) {
-	if user.Dir == "" {
-		return nil, fmt.Errorf("user %s has no home directory", user.Username)
-	}
-	absRoot, err := filepath.Abs(user.Dir)
+func newSFTPHandlers(root string, uid, gid uint64) (*sftpHandlers, error) {
+	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
 	}
-	return &sftpHandlers{user: user, root: absRoot}, nil
+	return &sftpHandlers{user: &unix_util.User{Uid: uid, Gid: gid}, root: absRoot}, nil
 }
 
 // serveSFTPSubsystem runs for the whole lifetime of an "sftp" channel; it
 // must be spawned as its own goroutine and must not touch runningSessions,
 // since closing the channel ends only this transfer, not the conversation.
 func serveSFTPSubsystem(user *unix_util.User, channel ssh3.Channel) {
-	handlers, err := newSFTPHandlers(user)
+	defer channel.Close()
+	if sftpJailMode == sftpJailLexical || os.Geteuid() != 0 && user.Dir == "" {
+		serveSFTPInProcess(user, channel)
+		return
+	}
+	serveSFTPChrootChild(user, channel)
+}
+
+// serveSFTPChrootChild spawns the internal sftp child and pumps bytes
+// between the channel and its stdio. Nothing here opens user paths: path
+// confinement happens entirely inside the child (cmd/internal_sftp.go).
+func serveSFTPChrootChild(user *unix_util.User, channel ssh3.Channel) {
+	exe, err := os.Executable()
+	if err != nil {
+		log.Error().Msgf("sftp subsystem: could not resolve the server executable: %s", err)
+		return
+	}
+	args := []string{"-sftp-server-internal"}
+	if os.Geteuid() == 0 {
+		args = append(args, "-sftp-chroot", user.Dir,
+			"-sftp-uid", strconv.FormatUint(user.Uid, 10),
+			"-sftp-gid", strconv.FormatUint(user.Gid, 10))
+	} else {
+		// a non-root server has no privileges worth jailing; the child keeps
+		// the lexical namespace and serves with the server's own identity
+		args = append(args, "-sftp-root", user.Dir)
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Env = []string{} // sanitized like sshd's sftp-server child; the child execs nothing
+	cmd.Stderr = os.Stderr
+
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		log.Error().Msgf("sftp subsystem: stdin pipe: %s", err)
+		return
+	}
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		stdinR.Close()
+		stdinW.Close()
+		log.Error().Msgf("sftp subsystem: stdout pipe: %s", err)
+		return
+	}
+	cmd.Stdin, cmd.Stdout = stdinR, stdoutW
+	if err := cmd.Start(); err != nil {
+		stdinR.Close()
+		stdinW.Close()
+		stdoutR.Close()
+		stdoutW.Close()
+		log.Error().Msgf("sftp subsystem: could not start the internal sftp child: %s", err)
+		return
+	}
+	// the child holds its ends from now on
+	stdinR.Close()
+	stdoutW.Close()
+
+	rwc := ssh3.NewChannelReadWriteCloser(channel)
+	pumpDone := make(chan struct{})
+	go func() {
+		defer util.PanicGuard("cmd/sftp_subsystem.go:channel-to-child")()
+		defer close(pumpDone)
+		io.Copy(stdinW, rwc)
+		// the child's sftp server ends on stdin EOF
+		stdinW.Close()
+	}()
+	go func() {
+		defer util.PanicGuard("cmd/sftp_subsystem.go:child-to-channel")()
+		io.Copy(rwc, stdoutR)
+	}()
+
+	cmd.Wait()
+	stdoutR.Close()
+	// unblock the pumps if the peer keeps the channel open past the child's
+	// death; the deferred channel.Close() does the final teardown
+	channel.Close()
+	select {
+	case <-pumpDone:
+	case <-time.After(2 * time.Second):
+	}
+}
+
+// serveSFTPInProcess is the lexical -sftp-jail mode: the historical
+// in-process handler set, with whatever privileges the server process has.
+func serveSFTPInProcess(user *unix_util.User, channel ssh3.Channel) {
+	handlers, err := newSFTPHandlers(user.Dir, user.Uid, user.Gid)
 	if err != nil {
 		log.Error().Msgf("sftp subsystem: %s", err)
-		channel.Close()
 		return
 	}
 	rwc := ssh3.NewChannelReadWriteCloser(channel)
@@ -74,11 +176,20 @@ func serveSFTPSubsystem(user *unix_util.User, channel ssh3.Channel) {
 		if err := server.Close(); err != nil {
 			log.Debug().Msgf("sftp subsystem: server close: %s", err)
 		}
-		channel.Close()
 	}()
 	if err := server.Serve(); err != nil && !errors.Is(err, io.EOF) {
 		log.Info().Msgf("sftp subsystem ended on channel %d: %s", channel.ChannelID(), err)
 	}
+}
+
+// withinRoot reports whether abs lives under root. The root itself counts
+// as within, and a "/" root (the chroot child's view) contains every
+// absolute path.
+func withinRoot(abs, root string) bool {
+	if root == string(filepath.Separator) {
+		return true
+	}
+	return abs == root || strings.HasPrefix(abs, root+string(filepath.Separator))
 }
 
 // resolveJailed maps a client-visible path into the jail, rejecting escapes.
@@ -87,6 +198,10 @@ func serveSFTPSubsystem(user *unix_util.User, channel ssh3.Channel) {
 // ("/home/user/docs/f") are honored as-is when they already live inside the
 // jail — the spelling a user knows from an interactive shell. Absolute
 // paths outside the jail remain an escape error.
+//
+// In the chroot mode this mapping is only the namespace translation: the
+// kernel confines the child to the jail root, so even a mapped path cannot
+// reach outside it.
 func (h *sftpHandlers) resolveJailed(clientPath string) (string, error) {
 	trimmed := strings.TrimSpace(clientPath)
 	if trimmed == "" {
@@ -94,13 +209,13 @@ func (h *sftpHandlers) resolveJailed(clientPath string) (string, error) {
 	}
 	if filepath.IsAbs(filepath.FromSlash(trimmed)) {
 		abs := filepath.Clean(filepath.FromSlash(trimmed))
-		if abs == h.root || strings.HasPrefix(abs, h.root+string(filepath.Separator)) {
+		if withinRoot(abs, h.root) {
 			return abs, nil
 		}
 	}
 	clean := path.Clean("/" + trimmed)
 	full := filepath.Join(h.root, filepath.FromSlash(clean))
-	if full != h.root && !strings.HasPrefix(full, h.root+string(filepath.Separator)) {
+	if !withinRoot(full, h.root) {
 		return "", fmt.Errorf("path %q escapes the home directory", clientPath)
 	}
 	return full, nil
@@ -115,7 +230,7 @@ func (h *sftpHandlers) chownToUser(name string) {
 // chownToUserRoot fixes ownership of freshly created directories under the
 // jail (MkdirAll may create more than one level).
 func (h *sftpHandlers) chownToUserRoot(name string) {
-	for current := name; current != h.root && strings.HasPrefix(current, h.root+string(filepath.Separator)); current = filepath.Dir(current) {
+	for current := name; current != h.root && withinRoot(current, h.root); current = filepath.Dir(current) {
 		h.chownToUser(current)
 	}
 }

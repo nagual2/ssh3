@@ -154,6 +154,7 @@ func setupEnv(user *unix_util.User, runningCommand *runningCommand, authAgentSoc
 
 func forwardUDPInBackground(ctx context.Context, channel ssh3.Channel, conn *net.UDPConn) {
 	go func() {
+		defer util.PanicGuard("cmd/ssh3-server.go:156")()
 		defer conn.Close()
 		for {
 			select {
@@ -175,6 +176,7 @@ func forwardUDPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 	}()
 
 	go func() {
+		defer util.PanicGuard("cmd/ssh3-server.go:177")()
 		defer channel.Close()
 		defer conn.Close()
 		buf := make([]byte, 1500)
@@ -200,6 +202,7 @@ func forwardUDPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 
 func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net.TCPConn) {
 	go func() {
+		defer util.PanicGuard("cmd/ssh3-server.go:202")()
 		defer conn.CloseWrite()
 		for {
 			select {
@@ -240,6 +243,7 @@ func forwardTCPInBackground(ctx context.Context, channel ssh3.Channel, conn *net
 	}()
 
 	go func() {
+		defer util.PanicGuard("cmd/ssh3-server.go:242")()
 		defer channel.Close()
 		defer conn.CloseRead()
 		buf := make([]byte, channel.MaxPacketSize())
@@ -332,6 +336,7 @@ func execCmdInBackground(channel ssh3.Channel, user *unix_util.User, session *ru
 
 	done := session.runningCmdDone
 	go func() {
+		defer util.PanicGuard("cmd/ssh3-server.go:334")()
 		defer close(done)
 
 		type readResult struct {
@@ -757,9 +762,12 @@ func newExitSignalReq(user *unix_util.User, channel ssh3.Channel, request ssh3Me
 }
 
 func handleUDPForwardingChannel(ctx context.Context, user *unix_util.User, conv *ssh3.Conversation, channel *ssh3.UDPForwardingChannelImpl) error {
-	// TODO: currently, the rights for socket creation are not checked. The socket is opened with the process's uid and gid
+	// TODO: currently, the socket is opened with the process's uid and gid
 	// Not sure how to handled that in go since we cannot temporarily change the uid/gid without potentially impacting every
 	// other goroutine
+	if err := checkForwardTarget("udp", channel.RemoteAddr.IP.String(), int(channel.RemoteAddr.Port)); err != nil {
+		return err
+	}
 	conn, err := net.DialUDP("udp", nil, channel.RemoteAddr)
 	if err != nil {
 		return err
@@ -769,9 +777,12 @@ func handleUDPForwardingChannel(ctx context.Context, user *unix_util.User, conv 
 }
 
 func handleTCPForwardingChannel(ctx context.Context, user *unix_util.User, conv *ssh3.Conversation, channel *ssh3.TCPForwardingChannelImpl) error {
-	// TODO: currently, the rights for socket creation are not checked. The socket is opened with the process's uid and gid
+	// TODO: currently, the socket is opened with the process's uid and gid
 	// Not sure how to handled that in go since we cannot temporarily change the uid/gid without potentially impacting every
 	// other goroutine
+	if err := checkForwardTarget("tcp", channel.RemoteAddr.IP.String(), channel.RemoteAddr.Port); err != nil {
+		return err
+	}
 	conn, err := net.DialTCP("tcp", nil, channel.RemoteAddr)
 	if err != nil {
 		return err
@@ -814,6 +825,7 @@ func handleAuthAgentSocketConn(conn net.Conn, conversation *ssh3.Conversation) {
 		return
 	}
 	go func() {
+		defer util.PanicGuard("cmd/ssh3-server.go:816")()
 		defer channel.Close()
 		buf := make([]byte, channel.MaxPacketSize())
 		for {
@@ -968,7 +980,42 @@ func ServerMain() int {
 		passwordLockoutSeconds = envSecs
 	}
 	flag.IntVar(&passwordLockoutSeconds, "password-lockout-seconds", passwordLockoutSeconds, "password brute-force lockout duration in seconds (SSH3_PASSWORD_LOCKOUT_SECONDS sets it too)")
+	// the sftp path-isolation mode: chroot (default, the sshd model) re-execs
+	// a per-session child that chroots into the user's home and drops to its
+	// uid/gid; lexical keeps the historical in-process jail
+	sftpJail := os.Getenv("SSH3_SFTP_JAIL")
+	if sftpJail == "" {
+		sftpJail = sftpJailChroot
+	}
+	flag.StringVar(&sftpJail, "sftp-jail", sftpJail, "sftp path isolation: chroot (default, the sshd model: a per-session child chroots into the user's home and drops to its uid/gid) or lexical (in-process jail; the server's own privileges apply)")
+	sftpServerInternal := flag.Bool("sftp-server-internal", false, "internal: run the sftp child server on stdin/stdout (set by the server itself, not for direct use)")
+	sftpChrootDir := flag.String("sftp-chroot", "", "internal: chroot directory of the sftp child; empty disables the chroot")
+	sftpRootDir := flag.String("sftp-root", "", "internal: path root of the sftp child when it runs without a chroot")
+	sftpChildUID := flag.Uint64("sftp-uid", 0, "internal: uid the sftp child drops to")
+	sftpChildGID := flag.Uint64("sftp-gid", 0, "internal: gid the sftp child drops to")
+	// the PermitOpen analog bounding server-side TCP/UDP/dynamic forwarding;
+	// empty (default) keeps the historical unrestricted behavior
+	permitOpenSpec := os.Getenv("SSH3_PERMIT_OPEN")
+	flag.StringVar(&permitOpenSpec, "permit-open", permitOpenSpec, "comma/space-separated host:port targets allowed for server-side forwarding (* wildcards, ! negates; e.g. \"*.example.org:443,!10.0.0.0:*\"; empty: unrestricted; SSH3_PERMIT_OPEN sets it too)")
 	flag.Parse()
+
+	policy, policyErr := parsePermitOpen(permitOpenSpec)
+	if policyErr != nil {
+		log.Error().Msgf("%s", policyErr)
+		return 1
+	}
+	permitOpen = policy
+
+	sftpJailMode = sftpJail
+	switch sftpJailMode {
+	case sftpJailChroot, sftpJailLexical:
+	default:
+		log.Error().Msgf("invalid -sftp-jail %q: must be %q or %q", sftpJailMode, sftpJailChroot, sftpJailLexical)
+		return 1
+	}
+	if *sftpServerInternal {
+		return runInternalSFTPServer(*sftpChrootDir, *sftpRootDir, *sftpChildUID, *sftpChildGID)
+	}
 
 	server_auth.MaxUnauthenticatedConversations = maxUnauthConversations
 	server_auth.MaxPasswordAuthFailures = maxPasswordFailures
@@ -1195,6 +1242,7 @@ func ServerMain() int {
 					exitStatusSent: make(chan struct{}),
 				})
 				go func() {
+					defer util.PanicGuard("cmd/ssh3-server.go:1197")()
 					// handle the main sessionChannel, once it ends, the whole conversation ends
 					// LIFO order matters: the channel (with its buffered exit-status
 					// frame) must close with a FIN before the conversation teardown,
@@ -1354,6 +1402,7 @@ func ServerMain() int {
 		connsMu.Unlock()
 		conns.Add(1)
 		go func() {
+			defer util.PanicGuard("cmd/ssh3-server.go:1356")()
 			defer conns.Done()
 			defer func() {
 				connsMu.Lock()
@@ -1378,6 +1427,7 @@ func ServerMain() int {
 		log.Info().Msgf("shutdown: draining active connections up to %s", drain)
 		drained := make(chan struct{})
 		go func() {
+			defer util.PanicGuard("cmd/ssh3-server.go:1380")()
 			conns.Wait()
 			close(drained)
 		}()
