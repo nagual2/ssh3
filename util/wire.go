@@ -201,10 +201,23 @@ func VarIntLen(i uint64) uint64 {
 	}{"value doesn't fit into 62 bits: ", i})
 }
 
+// MaxSSHStringLen bounds the length of any peer-provided SSH string before
+// an allocation is attempted. ParseSSHString used to make([]byte, length)
+// straight from a peer-controlled varint: 8 attacker bytes on a channel
+// stream sufficed for a makeslice panic or an unrecoverable out-of-memory.
+// 16 MiB stays above any legitimate use (the largest data chunks are bounded
+// by the negotiated MaxPacketSize, which parseHeader refuses above this
+// bound; commands and paths are bounded by PATH_MAX) while keeping the
+// worst-case allocation bounded.
+const MaxSSHStringLen = 1 << 24
+
 func ParseSSHString(buf Reader) (string, error) {
 	length, err := ReadVarInt(buf)
 	if err != nil {
 		return "", InvalidSSHString{err}
+	}
+	if length > MaxSSHStringLen {
+		return "", InvalidSSHString{fmt.Errorf("string length %d exceeds %d", length, MaxSSHStringLen)}
 	}
 	out := make([]byte, length)
 	n, err := io.ReadFull(buf, out)

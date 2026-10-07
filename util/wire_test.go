@@ -2,6 +2,7 @@ package util
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 )
 
@@ -36,6 +37,38 @@ func TestVarIntLenPanicsBeyond62Bits(t *testing.T) {
 		}
 	}()
 	VarIntLen(1 << 62)
+}
+
+// A peer-controlled string length must never drive an allocation: above the
+// cap ParseSSHString must reject without allocating (the old make([]byte,
+// length) turned 8 attacker bytes into a makeslice panic or an OOM kill).
+func TestParseSSHStringRejectsOversizedLength(t *testing.T) {
+	cases := []uint64{MaxSSHStringLen + 1, 1 << 40, 1<<62 - 1}
+	for _, length := range cases {
+		buf := AppendVarInt(nil, length)
+		_, err := ParseSSHString(NewReader(bytes.NewReader(buf)))
+		var invalid InvalidSSHString
+		if err == nil {
+			t.Errorf("length %d: expected InvalidSSHString, got no error", length)
+		} else if !errors.As(err, &invalid) {
+			t.Errorf("length %d: expected InvalidSSHString, got %v", length, err)
+		}
+	}
+}
+
+// lengths up to the cap stay accepted
+func TestParseSSHStringAcceptsLengthsUpToCap(t *testing.T) {
+	for _, length := range []uint64{0, 1, 1024, MaxSSHStringLen} {
+		payload := bytes.Repeat([]byte("a"), int(length))
+		buf := AppendVarInt(nil, length)
+		got, err := ParseSSHString(NewReader(bytes.NewReader(append(buf, payload...))))
+		if err != nil {
+			t.Fatalf("length %d: unexpected error %v", length, err)
+		}
+		if len(got) != int(length) {
+			t.Errorf("length %d: parsed %d bytes", length, len(got))
+		}
+	}
 }
 
 func TestVarIntAppendReadRoundtrip(t *testing.T) {

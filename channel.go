@@ -173,6 +173,12 @@ func parseHeader(channelID uint64, r util.Reader) (conversationControlStreamID C
 	if err != nil {
 		return 0, "", 0, err
 	}
+	// the peer's advertised packet size bounds the data messages it may send
+	// on the channel; left unbounded it is a second unvalidated allocation
+	// knob (data messages parse through ParseSSHString)
+	if maxPacketSize > util.MaxSSHStringLen {
+		return 0, "", 0, fmt.Errorf("peer max packet size %d exceeds %d", maxPacketSize, util.MaxSSHStringLen)
+	}
 	return conversationControlStreamID, channelType, maxPacketSize, nil
 }
 
