@@ -102,6 +102,7 @@ func getDynamicForwardState(conv *ssh3.Conversation) *dynamicForwardState {
 	state := &dynamicForwardState{}
 	dynamicForwardStates[conv] = state
 	go func() {
+		defer util.PanicGuard("cmd/dynamic_forward_server.go:104")()
 		<-conv.Context().Done()
 		dynamicForwardStatesMu.Lock()
 		delete(dynamicForwardStates, conv)
@@ -266,6 +267,12 @@ func readDynamicForwardTarget(stream dynamicForwardStream) (*ssh3Messages.Dynami
 // "dynamic-forward-tcp" channel. Unlike the reverse forwarding (-R) targets,
 // the address may be a hostname: a SOCKS client only knows a name.
 func dialDynamicForwardTarget(target *ssh3Messages.DynamicForwardTarget) (*net.TCPConn, error) {
+	// the policy matches the name as the SOCKS client spelled it (the
+	// PermitOpen convention); a name that resolves outside the policy stays
+	// denied even if its IPs would individually match
+	if err := checkForwardTarget("dynamic tcp", target.Address, int(target.Port)); err != nil {
+		return nil, err
+	}
 	address, err := net.ResolveTCPAddr("tcp", net.JoinHostPort(target.Address, strconv.Itoa(int(target.Port))))
 	if err != nil {
 		return nil, fmt.Errorf("could not resolve %q: %w", target.Address, err)
@@ -337,6 +344,7 @@ func pumpDynamicForwardTCP(ctx context.Context, stream dynamicForwardStream, con
 
 	// channel -> TCP
 	go func() {
+		defer util.PanicGuard("cmd/dynamic_forward_server.go:339")()
 		defer wg.Done()
 		defer conn.CloseWrite()
 		for {
@@ -373,6 +381,7 @@ func pumpDynamicForwardTCP(ctx context.Context, stream dynamicForwardStream, con
 
 	// TCP -> channel
 	go func() {
+		defer util.PanicGuard("cmd/dynamic_forward_server.go:375")()
 		defer wg.Done()
 		defer stream.Close()
 		defer conn.CloseRead()
