@@ -2,6 +2,7 @@ package message
 
 import (
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/francoismichel/ssh3/util"
@@ -209,6 +210,20 @@ func ParseExtendedDataMessage(buf util.Reader) (*DataOrExtendedDataMessage, erro
 	}, err
 }
 
+// UnknownMessageType is returned by ParseMessage when the peer sends a
+// message-type id this implementation does not know. It used to be a
+// panic("not implemented") — reachable with 2 bytes from any peer holding
+// an accepted channel, hence a remote process kill. There is no way to skip
+// an unknown message on the framing stream (its length is type-specific),
+// so the caller's only safe option is to tear the channel down.
+type UnknownMessageType struct {
+	TypeID uint64
+}
+
+func (e UnknownMessageType) Error() string {
+	return fmt.Sprintf("unknown message type id %d", e.TypeID)
+}
+
 func ParseMessage(r util.Reader) (Message, error) {
 	typeId, err := util.ReadVarInt(r)
 	if err != nil {
@@ -228,6 +243,6 @@ func ParseMessage(r util.Reader) (Message, error) {
 			return ParseExtendedDataMessage(r)
 		}
 	default:
-		panic("not implemented")
+		return nil, UnknownMessageType{TypeID: typeId}
 	}
 }
