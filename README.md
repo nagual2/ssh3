@@ -206,9 +206,15 @@ ssh3 max@my-server.example.org/ssh3-term -privkey ~/.ssh/id_ed25519
 
 ### File transfer
 
-Stage 2 adds an `ssh3 -f` mode over a dedicated SFTP channel (the server
-serves `pkg/sftp` jailed to the session user's home directory; created
-files belong to that user):
+Stage 2 adds an `ssh3 -f` mode over a dedicated SFTP channel (created
+files belong to the session user). Path isolation follows the sshd model by
+default (`-sftp-jail chroot`): the server re-execs a short-lived per-session
+child that chroots into the user's home and drops to the user's uid/gid
+before touching any path — confinement is the kernel's, and the
+network-facing process never opens user files. `-sftp-jail lexical` keeps
+the historical in-process jail (a lexical prefix check; the server process's
+own privileges apply — only sensible for an unprivileged single-user
+server):
 
 ```bash
 # upload a file (remote operand last)
