@@ -39,6 +39,32 @@ func TestVarIntLenPanicsBeyond62Bits(t *testing.T) {
 	VarIntLen(1 << 62)
 }
 
+// AppendVarIntWithLen keeps its panic contract explicit: an impossible
+// length and a value too wide for the requested length are caller bugs, and
+// the tests pin that behavior so a future error-return refactor notices.
+func TestAppendVarIntWithLenPanics(t *testing.T) {
+	cases := []struct {
+		name   string
+		value  uint64
+		length uint64
+	}{
+		{"invalid length 3", 1, 3},
+		{"invalid length 0", 1, 0},
+		{"value wider than the length", 16384, 1},
+		{"value wider than the length 2", 1 << 30, 2},
+	}
+	for _, c := range cases {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s: expected AppendVarIntWithLen(%d, %d) to panic", c.name, c.value, c.length)
+				}
+			}()
+			AppendVarIntWithLen(nil, c.value, c.length)
+		}()
+	}
+}
+
 // A peer-controlled string length must never drive an allocation: above the
 // cap ParseSSHString must reject without allocating (the old make([]byte,
 // length) turned 8 attacker bytes into a makeslice panic or an OOM kill).

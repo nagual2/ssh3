@@ -160,6 +160,16 @@ func buildForwardingChannelAdditionalBytes(remoteAddr net.IP, port uint16) []byt
 	return buf
 }
 
+// clampPeerMaxPacketSize bounds a peer-advertised maxPacketSize by the local
+// endpoint's own advertised value. The channel-open confirmation already
+// announces the local value, so lowering an inflated peer request is
+// protocol-consistent; without the clamp the peer picks the size of every
+// per-channel read buffer the endpoint allocates, and the number of channels
+// is only bounded by the QUIC stream limit (S2-01).
+func clampPeerMaxPacketSize(peer, local uint64) uint64 {
+	return util.MinUint64(peer, local)
+}
+
 func parseHeader(channelID uint64, r util.Reader) (conversationControlStreamID ControlStreamID, channelType string, maxPacketSize uint64, err error) {
 	conversationControlStreamID, err = util.ReadVarInt(r)
 	if err != nil {

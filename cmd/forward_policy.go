@@ -37,6 +37,12 @@ type forwardPolicy struct {
 
 var permitOpen *forwardPolicy
 
+// permitListen is the reverse-forward counterpart (S2-04): it bounds the
+// binds the client-requested -R listeners take on the server, with the
+// same sshd_config PermitListen semantics. nil (empty spec, the default)
+// keeps the historical unrestricted behavior.
+var permitListen *forwardPolicy
+
 // parsePermitOpen parses a comma/space-separated PermitOpen spec.
 func parsePermitOpen(spec string) (*forwardPolicy, error) {
 	spec = strings.TrimSpace(spec)
@@ -118,6 +124,16 @@ func matchForwardHost(host, pattern string) bool {
 func checkForwardTarget(kind, host string, port int) error {
 	if !permitOpen.allows(host, port) {
 		return fmt.Errorf("%s forwarding to %s:%d denied by -permit-open policy", kind, host, port)
+	}
+	return nil
+}
+
+// checkListenTarget is the single gate for every server-side bind a reverse
+// forward (-R) requests. Unlike dials, a bind occupies a server port: the
+// gate runs on the post-GatewayPorts address, the one actually bound.
+func checkListenTarget(kind, host string, port int) error {
+	if !permitListen.allows(host, port) {
+		return fmt.Errorf("%s listen on %s:%d denied by -permit-listen policy", kind, host, port)
 	}
 	return nil
 }

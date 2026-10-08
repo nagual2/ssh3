@@ -82,3 +82,30 @@ func TestForwardPolicyOnlyNegatedAllowsRest(t *testing.T) {
 		t.Error("with only negated entries, everything else stays allowed")
 	}
 }
+
+// checkListenTarget is the PermitListen analog gate: the global default is
+// unrestricted, an explicit spec bounds the binds.
+func TestCheckListenTarget(t *testing.T) {
+	saved := permitListen
+	defer func() { permitListen = saved }()
+
+	permitListen = nil
+	if err := checkListenTarget("tcp", "127.0.0.1", 8080); err != nil {
+		t.Errorf("a nil policy must allow every bind, got %v", err)
+	}
+
+	policy, err := parsePermitOpen("127.0.0.1:*,!0.0.0.0:*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	permitListen = policy
+	if err := checkListenTarget("tcp", "127.0.0.1", 8080); err != nil {
+		t.Errorf("a loopback bind must pass, got %v", err)
+	}
+	if err := checkListenTarget("udp", "0.0.0.0", 53); err == nil {
+		t.Error("a wildcard bind must be denied by the !0.0.0.0 entry")
+	}
+	if err := checkListenTarget("tcp", "192.0.2.1", 22); err == nil {
+		t.Error("a bind on an unlisted host must be denied when allow entries exist")
+	}
+}

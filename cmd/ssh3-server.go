@@ -997,6 +997,45 @@ func ServerMain() int {
 	// empty (default) keeps the historical unrestricted behavior
 	permitOpenSpec := os.Getenv("SSH3_PERMIT_OPEN")
 	flag.StringVar(&permitOpenSpec, "permit-open", permitOpenSpec, "comma/space-separated host:port targets allowed for server-side forwarding (* wildcards, ! negates; e.g. \"*.example.org:443,!10.0.0.0:*\"; empty: unrestricted; SSH3_PERMIT_OPEN sets it too)")
+	// the PermitListen analog bounding the binds the reverse (-R) forwards
+	// take on the server; governs binds, while -permit-open governs dials
+	permitListenSpec := os.Getenv("SSH3_PERMIT_LISTEN")
+	flag.StringVar(&permitListenSpec, "permit-listen", permitListenSpec, "comma/space-separated host:port binds allowed for reverse (-R) forwarding listeners (* wildcards, ! negates; e.g. \"127.0.0.1:*,!192.0.2.*:*\"; empty: unrestricted; governs binds, not dials; SSH3_PERMIT_LISTEN sets it too)")
+	maxChannelsPerConversation := 64
+	if envMax, err := strconv.Atoi(os.Getenv("SSH3_MAX_CHANNELS_PER_CONVERSATION")); err == nil {
+		maxChannelsPerConversation = envMax
+	}
+	flag.IntVar(&maxChannelsPerConversation, "max-channels-per-conversation", maxChannelsPerConversation, "maximum concurrently open channels per conversation, 0 for no limit (SSH3_MAX_CHANNELS_PER_CONVERSATION sets it too)")
+	maxSFTPSessionsPerUser := 16
+	if envMax, err := strconv.Atoi(os.Getenv("SSH3_MAX_SFTP_SESSIONS_PER_USER")); err == nil {
+		maxSFTPSessionsPerUser = envMax
+	}
+	flag.IntVar(&maxSFTPSessionsPerUser, "max-sftp-sessions-per-user", maxSFTPSessionsPerUser, "maximum concurrent sftp sessions per user, 0 for no limit (SSH3_MAX_SFTP_SESSIONS_PER_USER sets it too)")
+	maxConnections := 0
+	if envMax, err := strconv.Atoi(os.Getenv("SSH3_MAX_CONNECTIONS")); err == nil {
+		maxConnections = envMax
+	}
+	flag.IntVar(&maxConnections, "max-connections", maxConnections, "maximum concurrent QUIC connections, 0 for no limit (SSH3_MAX_CONNECTIONS sets it too)")
+	maxIdleTimeoutSecs := 30
+	if envSecs, err := strconv.Atoi(os.Getenv("SSH3_MAX_IDLE_TIMEOUT")); err == nil {
+		maxIdleTimeoutSecs = envSecs
+	}
+	flag.IntVar(&maxIdleTimeoutSecs, "max-idle-timeout", maxIdleTimeoutSecs, "QUIC idle timeout in seconds before a quiet connection is closed (SSH3_MAX_IDLE_TIMEOUT sets it too)")
+	handshakeIdleTimeoutSecs := 5
+	if envSecs, err := strconv.Atoi(os.Getenv("SSH3_HANDSHAKE_IDLE_TIMEOUT")); err == nil {
+		handshakeIdleTimeoutSecs = envSecs
+	}
+	flag.IntVar(&handshakeIdleTimeoutSecs, "handshake-idle-timeout", handshakeIdleTimeoutSecs, "QUIC handshake timeout in seconds (SSH3_HANDSHAKE_IDLE_TIMEOUT sets it too)")
+	maxIncomingStreams := 100
+	if envMax, err := strconv.Atoi(os.Getenv("SSH3_MAX_INCOMING_STREAMS")); err == nil {
+		maxIncomingStreams = envMax
+	}
+	flag.IntVar(&maxIncomingStreams, "max-incoming-streams", maxIncomingStreams, "maximum concurrent peer-initiated bidirectional QUIC streams per connection (SSH3_MAX_INCOMING_STREAMS sets it too)")
+	maxIncomingUniStreams := 100
+	if envMax, err := strconv.Atoi(os.Getenv("SSH3_MAX_INCOMING_UNI_STREAMS")); err == nil {
+		maxIncomingUniStreams = envMax
+	}
+	flag.IntVar(&maxIncomingUniStreams, "max-incoming-uni-streams", maxIncomingUniStreams, "maximum concurrent peer-initiated unidirectional QUIC streams per connection (SSH3_MAX_INCOMING_UNI_STREAMS sets it too)")
 	flag.Parse()
 
 	policy, policyErr := parsePermitOpen(permitOpenSpec)
@@ -1005,6 +1044,15 @@ func ServerMain() int {
 		return 1
 	}
 	permitOpen = policy
+
+	listenPolicy, listenPolicyErr := parsePermitOpen(permitListenSpec)
+	if listenPolicyErr != nil {
+		log.Error().Msgf("%s", listenPolicyErr)
+		return 1
+	}
+	permitListen = listenPolicy
+
+	sftpChildrenBudgets = newUserBudgets(maxSFTPSessionsPerUser)
 
 	sftpJailMode = sftpJail
 	switch sftpJailMode {
@@ -1172,7 +1220,14 @@ func ServerMain() int {
 		MaxStreamReceiveWindow:         uint64(*streamRxMiB) << 21,
 		InitialConnectionReceiveWindow: uint64(*connRxMiB) << 20,
 		MaxConnectionReceiveWindow:     uint64(*connRxMiB) << 21,
-		InitialPacketSize:              uint16(*initialPacketSize),
+		// explicit resource posture (S2-06): the defaults below equal the
+		// quic-go defaults, but are now documented operator knobs rather than
+		// an invisible library choice
+		MaxIdleTimeout:        time.Duration(maxIdleTimeoutSecs) * time.Second,
+		HandshakeIdleTimeout:  time.Duration(handshakeIdleTimeoutSecs) * time.Second,
+		MaxIncomingStreams:    int64(maxIncomingStreams),
+		MaxIncomingUniStreams: int64(maxIncomingUniStreams),
+		InitialPacketSize:     uint16(*initialPacketSize),
 	}
 
 	var err error
@@ -1191,6 +1246,30 @@ func ServerMain() int {
 		if err != nil {
 			return err
 		}
+
+		// S2-02: the channel accept loop used to be unbounded — every
+		// accepted channel became a goroutine (and, for sftp, a child
+		// process), so one account drove goroutine/process/heap growth by
+		// opening channels. Admit channels while the conversation stays under
+		// the cap; a refused channel is torn down with a stream error.
+		channels := newBudget(maxChannelsPerConversation)
+		// run the channel's handler on its own goroutine under a PanicGuard;
+		// the budget slot is held for the handler's lifetime
+		spawnChannel := func(channel ssh3.Channel, run func()) {
+			if !channels.tryAcquire() {
+				log.Warn().Msgf("conversation %s: refusing channel %d of type %q: the %d-channel budget is exhausted",
+					conv.ConversationID(), channel.ChannelID(), channel.ChannelType(), maxChannelsPerConversation)
+				channel.CancelRead()
+				channel.Close()
+				return
+			}
+			go func() {
+				defer util.PanicGuard("cmd/ssh3-server.go:channel-handler")()
+				defer channels.release()
+				run()
+			}()
+		}
+
 		for {
 			channel, err := conv.AcceptChannel(conv.Context())
 			if err != nil {
@@ -1200,16 +1279,22 @@ func ServerMain() int {
 			switch c := channel.(type) {
 			case *ssh3.UDPForwardingChannelImpl:
 				log.Debug().Msgf("accepted UDP forwarding channel %d to %s", channel.ChannelID(), c.RemoteAddr)
-				handleUDPForwardingChannel(conv.Context(), authenticatedUser, conv, c)
+				spawnChannel(channel, func() {
+					handleUDPForwardingChannel(conv.Context(), authenticatedUser, conv, c)
+				})
 			case *ssh3.TCPForwardingChannelImpl:
 				log.Debug().Msgf("accepted TCP forwarding channel %d to %s", channel.ChannelID(), c.RemoteAddr)
-				handleTCPForwardingChannel(conv.Context(), authenticatedUser, conv, c)
+				spawnChannel(channel, func() {
+					handleTCPForwardingChannel(conv.Context(), authenticatedUser, conv, c)
+				})
 			default:
 				if channel.ChannelType() == sftpChannelType {
 					log.Debug().Msgf("accepted sftp channel %d", channel.ChannelID())
 					// own goroutine, own lifetime: closing the transfer channel
 					// must not end the conversation the way a session does
-					go serveSFTPSubsystem(authenticatedUser, channel)
+					spawnChannel(channel, func() {
+						serveSFTPSubsystem(authenticatedUser, channel)
+					})
 					continue
 				}
 				if channel.ChannelType() == ssh3Messages.ChannelTypeReverseForward {
@@ -1217,21 +1302,27 @@ func ServerMain() int {
 					// own goroutine, own lifetime: serving the -R bind request
 					// and its listener must not end the conversation the way a
 					// session does
-					go handleReverseForwardChannel(conv, channel, authenticatedUser)
+					spawnChannel(channel, func() {
+						handleReverseForwardChannel(conv, channel, authenticatedUser)
+					})
 					continue
 				}
 				if channel.ChannelType() == ssh3Messages.ChannelTypeDynamicForward {
 					log.Debug().Msgf("accepted dynamic-forward control channel %d", channel.ChannelID())
 					// own goroutine, own lifetime: the control channel's
 					// lifetime is the dynamic forwarding (-D) session
-					go handleDynamicForwardChannel(conv, channel)
+					spawnChannel(channel, func() {
+						handleDynamicForwardChannel(conv, channel)
+					})
 					continue
 				}
 				if channel.ChannelType() == ssh3Messages.ChannelTypeDynamicForwardTCP {
 					log.Debug().Msgf("accepted dynamic-forward-tcp channel %d", channel.ChannelID())
 					// own goroutine, own lifetime: each bridged connection
 					// ends on its own, the conversation stays up
-					go serveDynamicForwardDataChannel(conv.Context(), getActiveDynamicForwardState(conv), channel)
+					spawnChannel(channel, func() {
+						serveDynamicForwardDataChannel(conv.Context(), getActiveDynamicForwardState(conv), channel)
+					})
 					continue
 				}
 				log.Debug().Msgf("accepted session channel %d of type %q", channel.ChannelID(), channel.ChannelType())
@@ -1241,7 +1332,7 @@ func ServerMain() int {
 					runningCmd:     nil,
 					exitStatusSent: make(chan struct{}),
 				})
-				go func() {
+				spawnChannel(channel, func() {
 					defer util.PanicGuard("cmd/ssh3-server.go:1197")()
 					// handle the main sessionChannel, once it ends, the whole conversation ends
 					// LIFO order matters: the channel (with its buffered exit-status
@@ -1256,6 +1347,10 @@ func ServerMain() int {
 					// the master disconnects (SetMultiplexed watcher).
 					defer func() {
 						channel.Close()
+						// S2-02: the process-global session map used to grow by
+						// one entry per session channel for the server's whole
+						// lifetime; prune the entry when the session ends
+						runningSessions.Delete(channel)
 						if conv.IsMultiplexed() {
 							log.Debug().Msgf("muxed conversation: skipping per-session teardown for channel %d", channel.ChannelID())
 							return
@@ -1351,7 +1446,7 @@ func ServerMain() int {
 							return
 						}
 					}
-				}()
+				})
 			}
 
 		}
@@ -1398,6 +1493,14 @@ func ServerMain() int {
 			return -1
 		}
 		connsMu.Lock()
+		// S2-06: bound how many QUIC connections the server holds at once;
+		// 0 (the default) keeps the historical unbounded behavior
+		if maxConnections > 0 && len(activeConns) >= maxConnections {
+			connsMu.Unlock()
+			log.Warn().Msgf("refusing a new QUIC connection: the %d-connection limit is reached", maxConnections)
+			qconn.CloseWithError(quic.ApplicationErrorCode(0), "too many connections")
+			continue
+		}
 		activeConns[qconn] = struct{}{}
 		connsMu.Unlock()
 		conns.Add(1)

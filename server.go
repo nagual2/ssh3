@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	message "github.com/francoismichel/ssh3/message"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/rs/zerolog/log"
@@ -154,6 +155,31 @@ func (s *Server) handleChannelStream(qconn *quic.Conn, stream *quic.Stream) {
 		stream.CancelWrite(quic.StreamErrorCode(0))
 		return
 	}
+
+	switch channelType {
+	case message.ChannelTypeForwardedTCP, message.ChannelTypeForwardedUDP:
+		// server-to-client channel types (reverse forwarding, -R): a client
+		// opening them towards the server used to fall through to the session
+		// branch and occupy a dead session slot; refusing keeps the channel
+		// role table direction-consistent (S2-03).
+		log.Warn().Msgf("refusing client-opened %s channel %d (server-to-client only)", channelType, uint64(stream.StreamID()))
+		stream.CancelRead(quic.StreamErrorCode(0))
+		stream.CancelWrite(quic.StreamErrorCode(0))
+		return
+	}
+
+	// the peer advertises its own maxPacketSize; bound it by the server's own
+	// value, otherwise the peer picks the size of every per-channel read
+	// buffer the server allocates (S2-01: ~100 streams × 16 MiB per
+	// connection). The confirmation already announces the server's value, so
+	// lowering is protocol-consistent.
+	peerMaxPacketSize := maxPacketSize
+	maxPacketSize = clampPeerMaxPacketSize(maxPacketSize, s.maxPacketSize)
+	if maxPacketSize != peerMaxPacketSize {
+		log.Debug().Msgf("lowered peer maxPacketSize %d to the server's %d on channel %d",
+			peerMaxPacketSize, maxPacketSize, uint64(stream.StreamID()))
+	}
+
 	log.Debug().Msgf(
 		"accepted SSH3 channel %d of type %q for control stream %d",
 		uint64(stream.StreamID()),

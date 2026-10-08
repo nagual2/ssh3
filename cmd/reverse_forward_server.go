@@ -221,6 +221,20 @@ func handleReverseForwardChannel(conv *ssh3.Conversation, channel ssh3.Channel, 
 		return
 	}
 
+	// the -permit-listen gate (the PermitListen analog): runs on the
+	// post-GatewayPorts bind address, the one actually bound, and before the
+	// budget so a denied request does not consume a listener slot (S2-04)
+	listenKind := "tcp"
+	if request.Protocol == util.SSHProtocolUDP {
+		listenKind = "udp"
+	}
+	if err := checkListenTarget(listenKind, bindAddress, int(request.BindPort)); err != nil {
+		releaseReverseForwardBind(user.Username)
+		log.Warn().Msgf("refusing reverse-forward bind on channel %d: %s", channel.ChannelID(), err)
+		writeReverseForwardReply(channel, &ssh3Messages.ReverseForwardReply{ErrorUTF8: err.Error()})
+		return
+	}
+
 	bindPortString := strconv.Itoa(int(request.BindPort))
 	var listener io.Closer
 	var boundPort uint16
@@ -320,6 +334,7 @@ func warnOnWideReverseBind(ip net.IP) {
 // channel itself is closed by the handler's defer once it observes the same
 // context.
 func watchConversationEnd(conv *ssh3.Conversation, listener io.Closer, username string) {
+	defer util.PanicGuard("cmd/reverse_forward_server.go:watchConversationEnd")()
 	<-conv.Context().Done()
 	listener.Close()
 	releaseReverseForwardBind(username)

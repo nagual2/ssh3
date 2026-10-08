@@ -356,6 +356,10 @@ func (m *SyncMap[K, V]) Insert(key K, val V) {
 	m.inner.Store(key, val)
 }
 
+func (m *SyncMap[K, V]) Delete(key K) {
+	m.inner.Delete(key)
+}
+
 // PanicGuard returns a func suitable for `defer` that turns a panic into an
 // error log entry. The QUIC-facing goroutines parse peer-controlled bytes;
 // a panic in any of them must take down the offending stream or connection,
