@@ -289,6 +289,9 @@ func (c *Conversation) handleIncomingChannelStream(stream *quic.Stream) {
 		log.Error().Msgf("could not parse channel header on stream %d: %s", uint64(stream.StreamID()), err)
 		return
 	}
+	// a malicious server must not pick the size of the client's read buffers
+	// either: bound the peer's value by the locally advertised one (S2-01)
+	maxPacketSize = clampPeerMaxPacketSize(maxPacketSize, c.maxPacketSize)
 	// todo: handle several conversations for the same client on the same connection ?
 	// This can be done by defining the conversation ID as a combination between the control stream ID
 	// and the tls exporter value, or computing the exporter value depending on the stream ID
@@ -310,6 +313,15 @@ func (c *Conversation) handleIncomingChannelStream(stream *quic.Stream) {
 	newChannel := NewChannel(channelInfo.ConversationStreamID, channelInfo.ConversationID, uint64(stream.StreamID()), channelInfo.ChannelType, channelInfo.MaxPacketSize, stream, stream, nil, c.channelsManager, false, false, true, c.defaultDatagramsQueueSize, nil)
 	newChannel.setDatagramSender(c.getDatagramSenderForChannel(newChannel.ChannelID()))
 	switch channelType {
+	case "direct-tcp", "direct-udp":
+		// client-role-only channel types: the server never opens them towards
+		// the client (it answers -L/-D dials on client-opened direct-*
+		// channels). Accepting them here would let a server masquerade as a
+		// forwarding target, so refuse with a stream error (S2-03).
+		log.Warn().Msgf("refusing server-opened %s channel %d (client-to-server only)", channelType, channelInfo.ChannelID)
+		stream.CancelRead(quic.StreamErrorCode(0))
+		stream.CancelWrite(quic.StreamErrorCode(0))
+		return
 	case "forwarded-tcp":
 		// reverse port forwarding (-R): the additional header bytes carry the
 		// client-side target the channel must be bridged to
