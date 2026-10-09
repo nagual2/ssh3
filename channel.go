@@ -160,14 +160,60 @@ func buildForwardingChannelAdditionalBytes(remoteAddr net.IP, port uint16) []byt
 	return buf
 }
 
-// clampPeerMaxPacketSize bounds a peer-advertised maxPacketSize by the local
-// endpoint's own advertised value. The channel-open confirmation already
-// announces the local value, so lowering an inflated peer request is
-// protocol-consistent; without the clamp the peer picks the size of every
-// per-channel read buffer the endpoint allocates, and the number of channels
-// is only bounded by the QUIC stream limit (S2-01).
+// minPeerMaxPacketSize floors a peer-advertised maxPacketSize (P3-02): below
+// the empty data-frame length the outbound chunk size in WriteData
+// (MaxPacketSize - emptyMsgLen) underflows uint64 and sends whole buffers as
+// one oversized frame, and a 0/1-byte read buffer deadlocks the channel
+// anyway. The confirmation announces the floored value, so the peer sees
+// what this endpoint actually accepts.
+const minPeerMaxPacketSize = 4096
+
+// clampPeerMaxPacketSize bounds a peer-advertised maxPacketSize from both
+// sides: by the local endpoint's own advertised value from above — the
+// channel-open confirmation already announces the local value, so lowering
+// an inflated peer request is protocol-consistent — and by
+// minPeerMaxPacketSize from below. Without the bounds the peer picks the
+// size of every per-channel read buffer the endpoint allocates, and the
+// number of channels is only bounded by the QUIC stream limit (S2-01).
 func clampPeerMaxPacketSize(peer, local uint64) uint64 {
+	if peer < minPeerMaxPacketSize {
+		peer = minPeerMaxPacketSize
+	}
 	return util.MinUint64(peer, local)
+}
+
+// The channel-type role table as allow-lists (S2-03/P3-03): an endpoint
+// accepts only the channel types the peer's role may open. The negative
+// checks this replaces refused the four known cross-role names, while any
+// other unknown string fell through to the session branch and occupied a
+// real session slot.
+//
+// The two sets must cover exactly what the dispatch layers handle: the
+// server's accept loop in cmd/ssh3-server.go consumes the client-opened
+// set, the client's acceptLoop in client/reverse_forward.go the
+// server-opened one (channel_types_test.go pins the table).
+
+// serverAcceptsChannelType reports whether a client may open channelType
+// towards the server.
+func serverAcceptsChannelType(channelType string) bool {
+	switch channelType {
+	case "session", "sftp", "direct-tcp", "direct-udp",
+		ssh3.ChannelTypeReverseForward, ssh3.ChannelTypeDynamicForward, ssh3.ChannelTypeDynamicForwardTCP:
+		return true
+	default:
+		return false
+	}
+}
+
+// clientAcceptsChannelType reports whether the server may open channelType
+// towards the client.
+func clientAcceptsChannelType(channelType string) bool {
+	switch channelType {
+	case ssh3.ChannelTypeForwardedTCP, ssh3.ChannelTypeForwardedUDP, "agent-connection":
+		return true
+	default:
+		return false
+	}
 }
 
 func parseHeader(channelID uint64, r util.Reader) (conversationControlStreamID ControlStreamID, channelType string, maxPacketSize uint64, err error) {

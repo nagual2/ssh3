@@ -2,25 +2,39 @@ package ssh3
 
 import "testing"
 
-// clampPeerMaxPacketSize is the S2-01 bound: the peer's advertised value
-// sizes the endpoint's per-channel read buffers, so it must never exceed the
-// locally advertised one.
+// clampPeerMaxPacketSize is the S2-01/P3-02 bound: the peer's advertised
+// value sizes the endpoint's per-channel read buffers, so it must never
+// exceed the locally advertised one, and it must never drop below the
+// minimum sane packet size — below the empty data-frame length the outbound
+// chunk size in WriteData (MaxPacketSize - emptyMsgLen) underflows uint64.
 func TestClampPeerMaxPacketSize(t *testing.T) {
 	const local = 30000
 	cases := []struct {
 		peer uint64
 		want uint64
 	}{
-		{0, 0},
-		{1, 1},
-		{30000, 30000},   // equal to the local value stays as-is
-		{30001, 30000},   // slightly above is lowered
-		{1 << 24, 30000}, // the 16 MiB ParseSSHString cap is lowered too
+		{0, minPeerMaxPacketSize},    // a 0-byte buffer would deadlock the channel
+		{1, minPeerMaxPacketSize},    // below the 2-byte empty data frame: uint64 underflow
+		{4095, minPeerMaxPacketSize}, // just under the floor
+		{4096, 4096},                 // exactly the floor stays as-is
+		{29999, 29999},               // between floor and local stays as-is
+		{30000, 30000},               // equal to the local value stays as-is
+		{30001, 30000},               // slightly above is lowered
+		{1 << 24, 30000},             // the 16 MiB ParseSSHString cap is lowered too
 		{1 << 62, 30000},
 	}
 	for _, c := range cases {
 		if got := clampPeerMaxPacketSize(c.peer, local); got != c.want {
 			t.Errorf("clampPeerMaxPacketSize(%d, %d) = %d, want %d", c.peer, local, got, c.want)
 		}
+	}
+}
+
+// a local value under the floor must not be raised: the clamp bounds the
+// peer by what the local endpoint itself advertises
+func TestClampPeerMaxPacketSizeSmallLocal(t *testing.T) {
+	const local = 2048
+	if got := clampPeerMaxPacketSize(0, local); got != local {
+		t.Errorf("clampPeerMaxPacketSize(0, %d) = %d, want %d", local, got, local)
 	}
 }

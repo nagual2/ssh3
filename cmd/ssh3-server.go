@@ -1254,20 +1254,24 @@ func ServerMain() int {
 		// the cap; a refused channel is torn down with a stream error.
 		channels := newBudget(maxChannelsPerConversation)
 		// run the channel's handler on its own goroutine under a PanicGuard;
-		// the budget slot is held for the handler's lifetime
-		spawnChannel := func(channel ssh3.Channel, run func()) {
+		// the budget slot is held for the handler's lifetime. Returns false
+		// when the budget refuses the channel: it is torn down here and no
+		// goroutine is started, so the caller must undo any per-channel
+		// registration it made before admission.
+		spawnChannel := func(channel ssh3.Channel, run func()) bool {
 			if !channels.tryAcquire() {
 				log.Warn().Msgf("conversation %s: refusing channel %d of type %q: the %d-channel budget is exhausted",
 					conv.ConversationID(), channel.ChannelID(), channel.ChannelType(), maxChannelsPerConversation)
 				channel.CancelRead()
 				channel.Close()
-				return
+				return false
 			}
 			go func() {
 				defer util.PanicGuard("cmd/ssh3-server.go:channel-handler")()
 				defer channels.release()
 				run()
 			}()
+			return true
 		}
 
 		for {
@@ -1332,7 +1336,7 @@ func ServerMain() int {
 					runningCmd:     nil,
 					exitStatusSent: make(chan struct{}),
 				})
-				spawnChannel(channel, func() {
+				if !spawnChannel(channel, func() {
 					defer util.PanicGuard("cmd/ssh3-server.go:1197")()
 					// handle the main sessionChannel, once it ends, the whole conversation ends
 					// LIFO order matters: the channel (with its buffered exit-status
@@ -1446,7 +1450,13 @@ func ServerMain() int {
 							return
 						}
 					}
-				})
+				}) {
+					// P3-01: the session goroutine owns the map prune, and
+					// the refusal means it never started — drop the entry
+					// here or every budget-refused session leaks it for the
+					// process lifetime
+					runningSessions.Delete(channel)
+				}
 			}
 
 		}

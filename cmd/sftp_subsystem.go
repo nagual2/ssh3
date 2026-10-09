@@ -49,11 +49,12 @@ const (
 // sftpJailMode is set from -sftp-jail / SSH3_SFTP_JAIL in ServerMain.
 var sftpJailMode = sftpJailChroot
 
-// sftpChildrenBudgets bounds the concurrent sftp children per authenticated
+// sftpChildrenBudgets bounds the concurrent sftp sessions per authenticated
 // user across their conversations (S2-02: the chroot mode re-execs a
 // root-then-drop child per sftp channel, so one account must not be able to
-// fill the process table). The limit comes from -max-sftp-sessions-per-user;
-// 0 disables the budget.
+// fill the process table; P3-04: the cheaper in-process mode is bounded by
+// the same budget instead of silently skipping it). The limit comes from
+// -max-sftp-sessions-per-user; 0 disables the budget.
 var sftpChildrenBudgets = newUserBudgets(16)
 
 // SFTP v3 open flags (private in pkg/sftp; SSH_FXF_* from the wire spec).
@@ -88,6 +89,14 @@ func serveSFTPSubsystem(user *unix_util.User, channel ssh3.Channel) {
 	// the chroot mode the child dies with its own process instead)
 	defer util.PanicGuard("cmd/sftp_subsystem.go:serveSFTPSubsystem")()
 	defer channel.Close()
+	// the per-user sftp cap holds in both jail modes (P3-04): the in-process
+	// path is cheaper than a child process, but it is still unbounded
+	// concurrent work per user when it skips the budget
+	if !sftpChildrenBudgets.budgetFor(user.Username).tryAcquire() {
+		log.Warn().Msgf("user %s hit the concurrent sftp session limit, refusing the sftp channel %d", user.Username, channel.ChannelID())
+		return
+	}
+	defer sftpChildrenBudgets.budgetFor(user.Username).release()
 	// a chroot child only buys kernel confinement, which only matters when
 	// the server holds privileges to contain: an unprivileged server serves
 	// in-process (with the panic guard above) instead of forking a pointless
@@ -96,11 +105,6 @@ func serveSFTPSubsystem(user *unix_util.User, channel ssh3.Channel) {
 		serveSFTPInProcess(user, channel)
 		return
 	}
-	if !sftpChildrenBudgets.budgetFor(user.Username).tryAcquire() {
-		log.Warn().Msgf("user %s hit the concurrent sftp session limit, refusing the sftp channel %d", user.Username, channel.ChannelID())
-		return
-	}
-	defer sftpChildrenBudgets.budgetFor(user.Username).release()
 	serveSFTPChrootChild(user, channel)
 }
 

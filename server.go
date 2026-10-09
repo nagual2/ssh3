@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	message "github.com/francoismichel/ssh3/message"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/rs/zerolog/log"
@@ -156,13 +155,12 @@ func (s *Server) handleChannelStream(qconn *quic.Conn, stream *quic.Stream) {
 		return
 	}
 
-	switch channelType {
-	case message.ChannelTypeForwardedTCP, message.ChannelTypeForwardedUDP:
-		// server-to-client channel types (reverse forwarding, -R): a client
-		// opening them towards the server used to fall through to the session
-		// branch and occupy a dead session slot; refusing keeps the channel
-		// role table direction-consistent (S2-03).
-		log.Warn().Msgf("refusing client-opened %s channel %d (server-to-client only)", channelType, uint64(stream.StreamID()))
+	if !serverAcceptsChannelType(channelType) {
+		// the allow-list gate (S2-03/P3-03): anything the client may not
+		// open towards the server is cancelled here, before any channel
+		// allocation, instead of falling through to the session branch
+		log.Warn().Msgf("refusing client-opened channel %d of type %q: not a client-to-server channel type",
+			uint64(stream.StreamID()), channelType)
 		stream.CancelRead(quic.StreamErrorCode(0))
 		stream.CancelWrite(quic.StreamErrorCode(0))
 		return
