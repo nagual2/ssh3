@@ -4,6 +4,16 @@ All notable changes to the **nagual2 fork** of SSH3, starting from the first for
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); each section maps to a release tag, newest first.
 
+## [0.1.29] - 2026-10-09
+
+### Security
+- **A budget-refused session channel no longer leaks its `runningSessions` entry** (P3-01, `cmd/ssh3-server.go`; pass-3 audit, `docs/SECURITY_AUDIT_PASS3_2026-10-09.md`): the v0.1.28 channel budget refused an over-cap channel before the handler goroutine started, but the session entry was inserted before that admission check and only the goroutine's teardown ever deleted it — every refused session channel kept one map entry (and the channel object it references) for the process lifetime. An authenticated peer holding the per-conversation budget exhausted (64 long-lived channels by default) could grow the map without bound by churn-opening session channels. `spawnChannel` now reports the refusal and the session branch prunes the entry it just inserted.
+- **The `maxPacketSize` clamp gained a floor** (P3-02, `channel.go`): the S2-01 clamp was a ceiling only, so a peer advertising `maxPacketSize` of 0 or 1 passed it verbatim — the outbound chunk size in `WriteData` (`MaxPacketSize - emptyMsgLen`, an unsigned subtraction with an empty-frame length of 2) wrapped to ~2^64 and sent the whole caller buffer as one oversized frame, while the per-channel read buffers were allocated 0/1 bytes. Peer values below 4096 (`minPeerMaxPacketSize`) are now floored; the channel-open confirmation announces the floored value, so the peer sees what the endpoint actually accepts. Self-inflicted exposure (the peer chose its own value), so this is hardening rather than a remote fix.
+- **The channel role table is an allow-list, not a negative list** (P3-03, `server.go`, `conversation.go`, `channel.go`): the S2-03 fix refused the four known cross-role names (`forwarded-tcp`/`forwarded-udp` from a client, `direct-tcp`/`direct-udp` from a server) but any other unknown type string still fell through to the session branch and occupied a real session slot. Both inbound paths now gate on allow-lists covering exactly the types each side dispatches (`session`, `sftp`, `direct-tcp`, `direct-udp`, `reverse-forward`, `dynamic-forward`, `dynamic-forward-tcp` on the server; `forwarded-tcp`, `forwarded-udp`, `agent-connection` on the client); anything else is cancelled with a stream error before any channel allocation. `channel_types_test.go` pins the table.
+- **`-max-sftp-sessions-per-user` is enforced in the in-process sftp mode too** (P3-04, `cmd/sftp_subsystem.go`): the per-user budget was acquired only on the chroot-child path, so on an unprivileged server (which serves sftp in-process) or in explicit `lexical` mode the documented cap silently did nothing. The budget is now acquired before the jail-mode branch, in both modes; while a session runs it holds the slot and releases it on exit (`cmd/sftp_budget_test.go`).
+
+The pass-3 fix-verification audit itself (`docs/SECURITY_AUDIT_PASS3_2026-10-09.md`) verifies the v0.1.28 remediation series (S2-01..S2-07) against `8725d65` and reports the findings above.
+
 ## [0.1.28] - 2026-10-05
 
 ### Security
