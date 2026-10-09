@@ -4,12 +4,6 @@ All notable changes to the **nagual2 fork** of SSH3, starting from the first for
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); each section maps to a release tag, newest first.
 
-## [0.1.26] - 2026-10-05
-
-### Changed
-- **The repository is renamed to [`nagual2/ssh3-go`](https://github.com/nagual2/ssh3-go)**: the fork is now a daily-driver Go client/server next to the C rewrite, and the name says so. GitHub redirects the old `nagual2/ssh3` URLs (web and git), and the Go module path stays `github.com/francoismichel/ssh3` — imports are unaffected.
-- **Packages are renamed: the deb/ar archives and the deb package are now `ssh3-go`** (`.goreleaser.yaml` `project_name`/`package_name`); the `ssh3-go` deb declares Conflicts/Replaces on `ssh3`, so an existing install migrates in place by installing the new package (or `dpkg -i ssh3-go_*.deb` directly). Binaries (`ssh3`, `ssh3-server`), the `ssh3-server.service` unit and `/etc/ssh3` configuration keep their names — scripts and systemd overrides are unaffected.
-
 ## [0.1.28] - 2026-10-05
 
 ### Security
@@ -56,6 +50,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); eac
 
 ### Fixed
 - **Reverse UDP forwards silently truncated datagrams at the server socket** (`cmd/reverse_forward_server.go`): the `-R .../udp` listener read into a 1500-byte buffer, so larger datagrams were cut at the read and the send then failed with a generic error. Datagrams are now read whole; one that exceeds the QUIC datagram limit of the path is dropped with an explicit warning naming the size and the path limit — the datagram path is lossy by design, but no longer silently truncated.
+
+## [0.1.26] - 2026-10-05
+
+### Changed
+- **The repository is renamed to [`nagual2/ssh3-go`](https://github.com/nagual2/ssh3-go)**: the fork is now a daily-driver Go client/server next to the C rewrite, and the name says so. GitHub redirects the old `nagual2/ssh3` URLs (web and git), and the Go module path stays `github.com/francoismichel/ssh3` — imports are unaffected.
+- **Packages are renamed: the deb/ar archives and the deb package are now `ssh3-go`** (`.goreleaser.yaml` `project_name`/`package_name`); the `ssh3-go` deb declares Conflicts/Replaces on `ssh3`, so an existing install migrates in place by installing the new package (or `dpkg -i ssh3-go_*.deb` directly). Binaries (`ssh3`, `ssh3-server`), the `ssh3-server.service` unit and `/etc/ssh3` configuration keep their names — scripts and systemd overrides are unaffected.
 
 ## [0.1.25] - 2026-10-04
 
