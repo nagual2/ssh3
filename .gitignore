@@ -1,6 +1,7 @@
 /bin/
 /target/
 dist/
+/ssh3.exe
 
 # local-only bug briefs (real LAN addresses, never publish)
 docs/BUG-*.md
