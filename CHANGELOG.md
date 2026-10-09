@@ -10,7 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); eac
 - **The repository is renamed to [`nagual2/ssh3-go`](https://github.com/nagual2/ssh3-go)**: the fork is now a daily-driver Go client/server next to the C rewrite, and the name says so. GitHub redirects the old `nagual2/ssh3` URLs (web and git), and the Go module path stays `github.com/francoismichel/ssh3` — imports are unaffected.
 - **Packages are renamed: the deb/ar archives and the deb package are now `ssh3-go`** (`.goreleaser.yaml` `project_name`/`package_name`); the `ssh3-go` deb declares Conflicts/Replaces on `ssh3`, so an existing install migrates in place by installing the new package (or `dpkg -i ssh3-go_*.deb` directly). Binaries (`ssh3`, `ssh3-server`), the `ssh3-server.service` unit and `/etc/ssh3` configuration keep their names — scripts and systemd overrides are unaffected.
 
-## Unreleased
+## [0.1.28] - 2026-10-05
 
 ### Security
 - **A peer no longer picks the size of the endpoint's per-channel read buffers** (S2-01, `server.go`, `conversation.go`, `channel.go`): an incoming channel kept the peer's advertised `maxPacketSize`, and the read loops allocated `make([]byte, channel.MaxPacketSize())` per channel — one authenticated connection could pin ~100 streams x up to 16 MiB of heap with ~30 bytes of input per channel (the v0.1.27 cap only bounded the value at 16 MiB). Both inbound paths (the server's channel accept and the client's counterpart) now clamp the peer value by the locally advertised one; the channel-open confirmation already announces the local value, so lowering is protocol-consistent.
