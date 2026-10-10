@@ -4,6 +4,12 @@ All notable changes to the **nagual2 fork** of SSH3, starting from the first for
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); each section maps to a release tag, newest first.
 
+## [0.1.32] - 2026-10-10
+
+### Fixed
+- **A single stale datagram no longer kills the client conversation's whole datagram loop** (F-14, `conversation.go`; pass-5 audit, `docs/SECURITY_AUDIT_PASS5_2026-10-10.md`): the client datagram receive loop treated any `AddDatagram` error as terminal, and since the P4-02 prune a datagram in flight while its channel closes comes back as `ChannelNotFound` — one such datagram silently silenced every channel's datagram delivery on the conversation for its remaining lifetime (the server loop has warned and continued on the same condition all along). The client loop now mirrors the server: `ChannelNotFound` is dropped with a warning, anything else stays terminal.
+- **The dangling-datagram-queue cap is no longer fail-closed** (F-15, `resources_manager.go`): at the 256-queue cap a brand-new ID was refused, so junk IDs could pin every slot for the conversation's lifetime and silently drop every legitimate pre-registration datagram afterwards. The cap now evicts the oldest dangling queue (FIFO, tracked in a small order slice; a registered channel's queue leaves the eviction set when it is handed over), so a fresh ID is always accepted while the bound — and its worst-case memory — stays unchanged.
+
 ## [0.1.31] - 2026-10-10
 
 ### Security

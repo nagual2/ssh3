@@ -77,3 +77,53 @@ func TestCloseWithoutListener(t *testing.T) {
 	ch := &channelImpl{ChannelInfo: ChannelInfo{ChannelID: 44}, send: &nopWriteCloser{}}
 	ch.Close()
 }
+
+// F-15: at the cap the map used to be fail-closed — a brand-new legitimate ID
+// was dropped for as long as junk IDs held all 256 slots. The oldest dangling
+// queue is now evicted instead, so a fresh ID is always accepted while the
+// bound (and its memory) stays.
+func TestDanglingQueueEvictsOldestAtCap(t *testing.T) {
+	m := newChannelsManager()
+	for i := 0; i < maxDanglingDatagramQueues; i++ {
+		m.addDanglingDatagramsQueue(util.ChannelID(i), []byte{byte(i)})
+	}
+	m.addDanglingDatagramsQueue(util.ChannelID(maxDanglingDatagramQueues), []byte("newest"))
+	if len(m.danglingDgramQueues) != maxDanglingDatagramQueues {
+		t.Fatalf("dangling queue count = %d, want the cap %d", len(m.danglingDgramQueues), maxDanglingDatagramQueues)
+	}
+	if _, ok := m.danglingDgramQueues[0]; ok {
+		t.Error("the oldest dangling queue (ID 0) was not evicted")
+	}
+	queue, ok := m.danglingDgramQueues[util.ChannelID(maxDanglingDatagramQueues)]
+	if !ok {
+		t.Fatal("the newest ID was dropped at the cap instead of evicting the oldest entry")
+	}
+	if got := queue.Next(); string(got) != "newest" {
+		t.Errorf("the newest queue holds %q, want %q", got, "newest")
+	}
+}
+
+// a registered channel must no longer be an eviction candidate: its queue was
+// handed over by addChannel, so evicting it would waste the slot on a no-op
+// delete and keep junk alive
+func TestDanglingEvictionSkipsRegisteredChannels(t *testing.T) {
+	m := newChannelsManager()
+	m.addDanglingDatagramsQueue(7, []byte("for-7"))
+	ch := &channelImpl{ChannelInfo: ChannelInfo{ChannelID: 7}, datagramsQueue: util.NewDatagramsQueue(8)}
+	m.addChannel(ch) // consumes the dangling queue and drops 7 from the eviction order
+
+	for i := 0; i < maxDanglingDatagramQueues+1; i++ {
+		m.addDanglingDatagramsQueue(util.ChannelID(100+i), []byte("junk"))
+	}
+	if len(m.danglingDgramQueues) != maxDanglingDatagramQueues {
+		t.Fatalf("dangling queue count = %d, want the cap", len(m.danglingDgramQueues))
+	}
+	if _, ok := m.danglingDgramQueues[100]; ok {
+		t.Error("the oldest junk queue (ID 100) survived an eviction round")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if got, err := ch.ReceiveDatagram(ctx); err != nil || string(got) != "for-7" {
+		t.Errorf("the registered channel lost its queued datagram: got %q, %v", got, err)
+	}
+}

@@ -54,7 +54,12 @@ func (m *conversationsManager) removeConversation(conversation *Conversation) {
 type channelsManager struct {
 	channels            map[util.ChannelID]Channel
 	danglingDgramQueues map[util.ChannelID]*util.DatagramsQueue
-	lock                sync.Mutex
+	// FIFO index into danglingDgramQueues, oldest first (F-15): at the cap
+	// the oldest junk queue is evicted instead of dropping a brand-new ID,
+	// which left the map fail-closed for the conversation's whole lifetime.
+	// Mutated only under lock, always together with the map.
+	danglingOrder []util.ChannelID
+	lock          sync.Mutex
 }
 
 func newChannelsManager() *channelsManager {
@@ -67,6 +72,7 @@ func (m *channelsManager) addChannel(channel Channel) {
 	if dgramsQueue, ok := m.danglingDgramQueues[channel.ChannelID()]; ok {
 		channel.setDgramQueue(dgramsQueue)
 		delete(m.danglingDgramQueues, channel.ChannelID())
+		m.danglingOrder = removeChannelID(m.danglingOrder, channel.ChannelID())
 	}
 	m.channels[util.ChannelID(channel.ChannelID())] = channel
 }
@@ -87,17 +93,26 @@ func (m *channelsManager) addDanglingDatagramsQueue(id util.ChannelID, datagram 
 	queue, ok := m.danglingDgramQueues[id]
 	if !ok {
 		// P4-01: a dangling queue is retained until a channel with this ID
-		// registers or the conversation dies; without a cap a peer cycling
-		// unknown channel IDs grows the map — and its buffered datagrams —
-		// for the conversation's whole lifetime. Only brand-new IDs are
-		// capped: a legitimate late datagram extends the queue it already has.
+		// registers or the conversation dies; the cap bounds the map. Only
+		// brand-new IDs hit this branch: a legitimate late datagram extends
+		// the queue it already has.
 		if len(m.danglingDgramQueues) >= maxDanglingDatagramQueues {
-			log.Warn().Msgf("too many dangling datagram queues (%d), dropping datagram for unregistered channel %d",
-				maxDanglingDatagramQueues, id)
-			return
+			// F-15: evict the oldest queue instead of refusing the new ID —
+			// refusing left the cap fail-closed, so junk IDs could silence
+			// legitimate pre-registration datagrams for the conversation's
+			// whole lifetime. The bound (and its memory) is unchanged.
+			if len(m.danglingOrder) == 0 {
+				log.Warn().Msgf("dangling datagram queues at cap with no eviction order, dropping datagram for unregistered channel %d", id)
+				return
+			}
+			oldest := m.danglingOrder[0]
+			m.danglingOrder = m.danglingOrder[1:]
+			delete(m.danglingDgramQueues, oldest)
+			log.Warn().Msgf("evicted dangling datagram queue for unregistered channel %d", oldest)
 		}
 		queue = util.NewDatagramsQueue(danglingDatagramQueueSize)
 		m.danglingDgramQueues[id] = queue
+		m.danglingOrder = append(m.danglingOrder, id)
 	}
 	if !queue.Add(datagram) {
 		log.Warn().Msgf("dangling datagram queue for channel %d is full, dropping datagram", id)
@@ -119,4 +134,16 @@ func (m *channelsManager) removeChannel(channel Channel) {
 
 func (m *channelsManager) onChannelClose(channel Channel) {
 	m.removeChannel(channel)
+}
+
+// removeChannelID removes id from the FIFO eviction order; the slice is small
+// (bounded by maxDanglingDatagramQueues), so a linear scan under the manager
+// mutex is fine.
+func removeChannelID(ids []util.ChannelID, id util.ChannelID) []util.ChannelID {
+	for i, candidate := range ids {
+		if candidate == id {
+			return append(ids[:i], ids[i+1:]...)
+		}
+	}
+	return ids
 }
