@@ -282,6 +282,7 @@ func downloadDir(sftpClient *sftp.Client, remoteRoot, localRoot string, resumeMo
 	type treeFile struct {
 		remote, relative string
 		size             int64
+		modTime          time.Time
 	}
 	files := make(chan treeFile)
 	var wg sync.WaitGroup
@@ -291,7 +292,7 @@ func downloadDir(sftpClient *sftp.Client, remoteRoot, localRoot string, resumeMo
 		for entry := range files {
 			localPath := filepath.Join(localRoot, filepath.FromSlash(entry.relative))
 			progress.rename(path.Base(localPath))
-			if code := downloadFileInTree(sftpClient, entry.remote, localPath, entry.size, resumeMode, verifyChecksum, progress); code != 0 {
+			if code := downloadFileInTree(sftpClient, entry.remote, localPath, entry.size, entry.modTime, resumeMode, verifyChecksum, progress); code != 0 {
 				failures.Add(1)
 			}
 		}
@@ -327,7 +328,7 @@ func downloadDir(sftpClient *sftp.Client, remoteRoot, localRoot string, resumeMo
 			if !walker.Stat().Mode().IsRegular() {
 				continue
 			}
-			files <- treeFile{remote: walker.Path(), relative: relative, size: walker.Stat().Size()}
+			files <- treeFile{remote: walker.Path(), relative: relative, size: walker.Stat().Size(), modTime: walker.Stat().ModTime()}
 		}
 	}()
 	wg.Wait()
@@ -364,9 +365,14 @@ func downloadFileTo(sftpClient *sftp.Client, remotePath, localPath string, resum
 				fmt.Fprintf(os.Stderr, "local %s is larger than remote (%d > %d bytes); remove it or drop --continue\n",
 					localPath, localInfo.Size(), info.Size())
 				return -1
-			case localInfo.Size() == info.Size():
-				fmt.Fprintf(os.Stderr, "%s is already fully downloaded, skipping\n", localPath)
+			case localInfo.Size() == info.Size() && localInfo.ModTime().Unix() == info.ModTime().Unix():
+				fmt.Fprintf(os.Stderr, "%s is already up to date (same size and mtime), skipping\n", localPath)
 				return 0
+			case localInfo.Size() == info.Size():
+				// the size alone cannot prove the content: a remote file
+				// rewritten in place keeps its size, so trust the mtime the
+				// previous download inherited and re-transfer (R7)
+				fmt.Fprintf(os.Stderr, "%s matches in size but the mtime differs, re-transferring\n", localPath)
 			default:
 				startOffset = localInfo.Size()
 				openFlags = os.O_WRONLY
@@ -402,6 +408,12 @@ func downloadFileTo(sftpClient *sftp.Client, remotePath, localPath string, resum
 			return -1
 		}
 		fmt.Fprintf(os.Stderr, "[ssh3 -f] checksum ok: %s\n", remotePath)
+	}
+	// inherit the remote mtime so the next --continue can skip by size+mtime
+	// (R7); a failure is not fatal — it costs one redundant download later
+	modTime := info.ModTime()
+	if err := os.Chtimes(localPath, modTime, modTime); err != nil {
+		fmt.Fprintf(os.Stderr, "cannot set mtime on %s: %s\n", localPath, err)
 	}
 	return 0
 }
@@ -459,9 +471,14 @@ func uploadFile(sftpClient *sftp.Client, localPath, remotePath string, resumeMod
 				fmt.Fprintf(os.Stderr, "remote %s is larger than local (%d > %d bytes); remove it or drop --continue\n",
 					remotePath, remoteInfo.Size(), info.Size())
 				return -1
-			case remoteInfo.Size() == info.Size():
-				fmt.Fprintf(os.Stderr, "%s is already fully uploaded, skipping\n", remotePath)
+			case remoteInfo.Size() == info.Size() && remoteInfo.ModTime().Unix() == info.ModTime().Unix():
+				fmt.Fprintf(os.Stderr, "%s is already up to date (same size and mtime), skipping\n", remotePath)
 				return 0
+			case remoteInfo.Size() == info.Size():
+				// the size alone cannot prove the content: a source rewritten
+				// in place keeps its size, so trust the stamped mtime instead
+				// and re-transfer (R7)
+				fmt.Fprintf(os.Stderr, "%s matches in size but the mtime differs, re-transferring\n", remotePath)
 			default:
 				startOffset = remoteInfo.Size()
 				openFlags = os.O_WRONLY // append via absolute writes from startOffset
@@ -518,6 +535,12 @@ func uploadFile(sftpClient *sftp.Client, localPath, remotePath string, resumeMod
 		}
 		fmt.Fprintf(os.Stderr, "[ssh3 -f] checksum ok: %s\n", remotePath)
 	}
+	// stamp the remote with the source's mtime: the --continue skip decision
+	// compares size+mtime (R7); a failure here only costs one redundant
+	// re-transfer on the next run, never data
+	if err := sftpClient.Chtimes(remotePath, info.ModTime(), info.ModTime()); err != nil {
+		fmt.Fprintf(os.Stderr, "cannot set mtime on %s: %s\n", remotePath, err)
+	}
 	return 0
 }
 
@@ -542,9 +565,14 @@ func uploadFileInTree(sftpClient *sftp.Client, localPath, remotePath string, res
 				fmt.Fprintf(os.Stderr, "remote %s is larger than local (%d > %d bytes); remove it or drop --continue\n",
 					remotePath, remoteInfo.Size(), info.Size())
 				return -1
-			case remoteInfo.Size() == info.Size():
-				fmt.Fprintf(os.Stderr, "%s is already fully uploaded, skipping\n", remotePath)
+			case remoteInfo.Size() == info.Size() && remoteInfo.ModTime().Unix() == info.ModTime().Unix():
+				fmt.Fprintf(os.Stderr, "%s is already up to date (same size and mtime), skipping\n", remotePath)
 				return 0
+			case remoteInfo.Size() == info.Size():
+				// the size alone cannot prove the content: a source rewritten
+				// in place keeps its size, so trust the stamped mtime instead
+				// and re-transfer (R7)
+				fmt.Fprintf(os.Stderr, "%s matches in size but the mtime differs, re-transferring\n", remotePath)
 			default:
 				startOffset = remoteInfo.Size()
 				openFlags = os.O_WRONLY // append via absolute writes from startOffset
@@ -584,13 +612,20 @@ func uploadFileInTree(sftpClient *sftp.Client, localPath, remotePath string, res
 		}
 		fmt.Fprintf(os.Stderr, "[ssh3 -f] checksum ok: %s\n", remotePath)
 	}
+	// stamp the remote with the source's mtime: the --continue skip decision
+	// compares size+mtime (R7), so without the stamp the next run would
+	// re-transfer the file once more. A failure is not fatal — it costs one
+	// redundant transfer later, never data
+	if err := sftpClient.Chtimes(remotePath, info.ModTime(), info.ModTime()); err != nil {
+		fmt.Fprintf(os.Stderr, "cannot set mtime on %s: %s\n", remotePath, err)
+	}
 	return 0
 }
 
 // downloadFileInTree is the recursive-transfer fast path: the walk already
-// carries the entry size, so the per-file remote Stat disappears — OPEN, the
-// reads, CLOSE carry the transfer.
-func downloadFileInTree(sftpClient *sftp.Client, remotePath, localPath string, size int64, resumeMode, verifyChecksum bool, progress *transferProgress) int {
+// carries the entry size and mtime, so the per-file remote Stat disappears —
+// OPEN, the reads, CLOSE carry the transfer.
+func downloadFileInTree(sftpClient *sftp.Client, remotePath, localPath string, size int64, modTime time.Time, resumeMode, verifyChecksum bool, progress *transferProgress) int {
 	openFlags := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
 	var startOffset int64
 	if resumeMode {
@@ -600,9 +635,14 @@ func downloadFileInTree(sftpClient *sftp.Client, remotePath, localPath string, s
 				fmt.Fprintf(os.Stderr, "local %s is larger than remote (%d > %d bytes); remove it or drop --continue\n",
 					localPath, localInfo.Size(), size)
 				return -1
-			case localInfo.Size() == size:
-				fmt.Fprintf(os.Stderr, "%s is already fully downloaded, skipping\n", localPath)
+			case localInfo.Size() == size && localInfo.ModTime().Unix() == modTime.Unix():
+				fmt.Fprintf(os.Stderr, "%s is already up to date (same size and mtime), skipping\n", localPath)
 				return 0
+			case localInfo.Size() == size:
+				// the size alone cannot prove the content: a remote file
+				// rewritten in place keeps its size, so trust the mtime the
+				// previous download inherited and re-transfer (R7)
+				fmt.Fprintf(os.Stderr, "%s matches in size but the mtime differs, re-transferring\n", localPath)
 			default:
 				startOffset = localInfo.Size()
 				openFlags = os.O_WRONLY
@@ -638,6 +678,11 @@ func downloadFileInTree(sftpClient *sftp.Client, remotePath, localPath string, s
 			return -1
 		}
 		fmt.Fprintf(os.Stderr, "[ssh3 -f] checksum ok: %s\n", remotePath)
+	}
+	// inherit the remote mtime so the next --continue can skip by size+mtime
+	// (R7); a failure is not fatal — it costs one redundant download later
+	if err := os.Chtimes(localPath, modTime, modTime); err != nil {
+		fmt.Fprintf(os.Stderr, "cannot set mtime on %s: %s\n", localPath, err)
 	}
 	return 0
 }
