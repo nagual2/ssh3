@@ -33,9 +33,6 @@ const (
 	// pipe session: remote ncurses programs refuse to start without one.
 	defaultPtyColumns = 80
 	defaultPtyRows    = 24
-	// defaultPtyTerm is the terminal type reported when TERM is unset; remote
-	// ncurses programs expect one.
-	defaultPtyTerm = "xterm"
 )
 
 // forwardedPtySignals maps the local signals worth propagating to the remote
@@ -50,14 +47,10 @@ var forwardedPtySignals = map[syscall.Signal]string{
 }
 
 // newForcedPtySpec builds the pty request for a forced-pty session. tty may be
-// nil: the geometry then falls back to 80x24 and the terminal type to $TERM or
-// "xterm".
-func newForcedPtySpec(tty *os.File) (*client.PtySpec, error) {
-	termType := os.Getenv("TERM")
-	if termType == "" {
-		termType = defaultPtyTerm
-	}
-
+// nil: the geometry then falls back to 80x24. termType comes pre-resolved from
+// the caller (resolveTermType): the -o Term option, the ~/.ssh/config keyword,
+// the local TERM environment variable or client.DefaultTermType.
+func newForcedPtySpec(tty *os.File, termType string) (*client.PtySpec, error) {
 	columns, rows := defaultPtyColumns, defaultPtyRows
 	var pixelWidth, pixelHeight uint64
 	if tty != nil {
@@ -82,8 +75,8 @@ func newForcedPtySpec(tty *os.File) (*client.PtySpec, error) {
 
 // runForcedPtySession opens a session channel with a pty and bridges the
 // process stdio into it, returning the terminal event of the session.
-func runForcedPtySession(ctx context.Context, c *client.Client, tty *os.File, forwardSSHAgent bool, escape *client.EscapeConfig, command ...string) error {
-	ptySpec, err := newForcedPtySpec(tty)
+func runForcedPtySession(ctx context.Context, c *client.Client, tty *os.File, forwardSSHAgent bool, escape *client.EscapeConfig, termType string, command ...string) error {
+	ptySpec, err := newForcedPtySpec(tty, termType)
 	if err != nil {
 		return err
 	}

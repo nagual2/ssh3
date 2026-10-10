@@ -9,6 +9,7 @@ package cmd
 import (
 	"fmt"
 	"net"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -249,6 +250,42 @@ func parseRequestTTY(value string) (string, error) {
 	default:
 		return "", fmt.Errorf("invalid RequestTTY policy %q: want auto, no, yes or force", value)
 	}
+}
+
+// parseTermType validates the Term value (-o Term=... and the ~/.ssh/config
+// keyword): a non-empty terminal name without whitespace or control
+// characters, at most 64 bytes, which is the size the servers keep for it as
+// a session extra.
+func parseTermType(value string) (string, error) {
+	term := strings.TrimSpace(value)
+	if term == "" {
+		return "", fmt.Errorf("empty Term value: want a terminal name, e.g. xterm-256color")
+	}
+	if len(term) > 64 {
+		return "", fmt.Errorf("Term value %q is too long (max 64 bytes)", value)
+	}
+	for i := 0; i < len(term); i++ {
+		if c := term[i]; c <= ' ' || c == 0x7f {
+			return "", fmt.Errorf("invalid Term value %q: whitespace and control characters are not allowed", value)
+		}
+	}
+	return term, nil
+}
+
+// resolveTermType applies the Term precedence: the -o option overrides the
+// ~/.ssh/config keyword, which overrides the local TERM environment variable;
+// client.DefaultTermType is the last resort.
+func resolveTermType(option, config string) string {
+	if option != "" {
+		return option
+	}
+	if config != "" {
+		return config
+	}
+	if env := os.Getenv("TERM"); env != "" {
+		return env
+	}
+	return client.DefaultTermType
 }
 
 // parseEscapeChar validates the EscapeChar value (-o EscapeChar=... and the

@@ -735,6 +735,7 @@ func ClientMain() int {
 	verifyHostKeyDNSOptionValue := ""
 	verifyHostKeyDNSOptionSet := false
 	requestTTYOption := "" // the -o RequestTTY=... value, empty when unset
+	termTypeOption := ""   // the -o Term=... value, empty when unset
 	escapeCharOption := "" // the -o EscapeChar=... value, empty when unset
 	parsersByKeyword := make(map[string]client_config.OptionName)
 	for optionName, parser := range cliParsers {
@@ -773,6 +774,17 @@ func ClientMain() int {
 				return -1
 			}
 			requestTTYOption = policy
+			continue
+		}
+		if strings.EqualFold(key, "Term") {
+			// validated here so a bad -o value is rejected like every other
+			// malformed option, before the connection is set up
+			term, err := parseTermType(value)
+			if err != nil {
+				log.Error().Msgf("%s", err)
+				return -1
+			}
+			termTypeOption = term
 			continue
 		}
 		if strings.EqualFold(key, "VerifyHostKeyDNS") {
@@ -1082,6 +1094,7 @@ func ClientMain() int {
 	// ssh3-server). Include directives are resolved by the config library.
 	tuning.KeepAlivePeriod = time.Second
 	requestTTYConfig := "" // the ~/.ssh/config RequestTTY value, empty when unset
+	termTypeConfig := ""   // the ~/.ssh/config Term value, empty when unset
 	escapeCharConfig := "" // the ~/.ssh/config EscapeChar value, empty when unset
 	if sshConfig != nil {
 		hostname := parsedUrl.Hostname()
@@ -1101,6 +1114,14 @@ func ClientMain() int {
 				return -1
 			}
 			requestTTYConfig = policy
+		}
+		if v, err := sshConfig.Get(hostname, "Term"); err == nil && v != "" {
+			term, termErr := parseTermType(v)
+			if termErr != nil {
+				log.Error().Msgf("%s", termErr)
+				return -1
+			}
+			termTypeConfig = term
 		}
 		if v, err := sshConfig.Get(hostname, "EscapeChar"); err == nil && v != "" {
 			if _, err := parseEscapeChar(v); err != nil {
@@ -1366,6 +1387,11 @@ func ClientMain() int {
 		requestTYTPolicy = "force"
 	}
 
+	// Term resolution (OpenSSH precedence): the -o option overrides the
+	// ~/.ssh/config keyword, then the local TERM environment variable applies,
+	// then the built-in 256-color default
+	termType := resolveTermType(termTypeOption, termTypeConfig)
+
 	// the interactive escape character: the -o option overrides the
 	// ~/.ssh/config keyword, ~ is the OpenSSH default, none disables
 	escapeCharStr := "~"
@@ -1403,7 +1429,7 @@ func ClientMain() int {
 		if subsystemName == sftpSubsystemName {
 			return runSFTPSubsystem(c.Conversation)
 		}
-		if err := runSubsystemSession(ctx, c, tty, subsystemName, requestTYTPolicy == "force"); err != nil {
+		if err := runSubsystemSession(ctx, c, tty, subsystemName, requestTYTPolicy == "force", termType); err != nil {
 			log.Error().Msgf("an error was encountered when running the %s subsystem: %s", subsystemName, err)
 			return -1
 		}
@@ -1428,7 +1454,7 @@ func ClientMain() int {
 	// regular session path cannot do: RunSession only allocates one when it
 	// finds a TTY.
 	if *forcePTY || requestTYTPolicy == "force" {
-		err = runForcedPtySession(ctx, c, tty, *forwardSSHAgent, escapeCfg, command...)
+		err = runForcedPtySession(ctx, c, tty, *forwardSSHAgent, escapeCfg, termType, command...)
 		if errors.Is(err, client.ErrEscapeDisconnect) {
 			return 255
 		}
@@ -1445,7 +1471,7 @@ func ClientMain() int {
 		}
 	}
 
-	err = c.RunSession(tty, *forwardSSHAgent, requestTYTPolicy, escapeCfg, command...)
+	err = c.RunSession(tty, *forwardSSHAgent, requestTYTPolicy, termType, escapeCfg, command...)
 	if errors.Is(err, client.ErrEscapeDisconnect) {
 		// the user tore the session down with the ~. escape sequence:
 		// the exit code matches a closed connection, as OpenSSH

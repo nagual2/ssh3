@@ -541,7 +541,13 @@ func (c *Client) ForwardTCP(ctx context.Context, localTCPAddr *net.TCPAddr, remo
 	return conn.Addr().(*net.TCPAddr), nil
 }
 
-func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, requestTTY string, escape *EscapeConfig, command ...string) error {
+// DefaultTermType is the terminal type reported to the server when neither the
+// caller nor the local TERM environment variable provide one: TERM is
+// practically only unset for GUI-launched clients on Windows, whose consoles
+// are 256-color capable.
+const DefaultTermType = "xterm-256color"
+
+func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, requestTTY string, resolvedTerm string, escape *EscapeConfig, command ...string) error {
 
 	ctx := c.Context()
 
@@ -578,10 +584,17 @@ func (c *Client) RunSession(tty *os.File, forwardSSHAgent bool, requestTTY strin
 			windowSize.NCols = 80
 			windowSize.NRows = 24
 		}
-		termType := os.Getenv("TERM")
+		// the caller-resolved type (-o Term / ~/.ssh/config Term) wins over
+		// the local environment; library callers may pass an empty type
+		termType := resolvedTerm
 		if termType == "" {
-			// remote ncurses programs expect a terminal type to be set
-			termType = "xterm"
+			termType = os.Getenv("TERM")
+		}
+		if termType == "" {
+			// remote ncurses programs expect a terminal type to be set;
+			// TERM is practically only unset for GUI-launched clients on
+			// Windows, whose consoles are 256-color capable
+			termType = DefaultTermType
 		}
 		spec.Pty = &PtySpec{
 			Term:        termType,

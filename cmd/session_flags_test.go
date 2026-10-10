@@ -3,26 +3,26 @@ package cmd
 import "testing"
 
 // -t has to work with no local terminal at all: the geometry then falls back to
-// 80x24 and the terminal type to xterm, which is what a remote ncurses program
-// needs to render anything sensible.
+// 80x24 and the terminal type to the caller-resolved value, which is what a
+// remote ncurses program needs to render anything sensible.
 func TestNewForcedPtySpecWithoutTerminal(t *testing.T) {
 	t.Setenv("TERM", "")
-	spec, err := newForcedPtySpec(nil)
+	spec, err := newForcedPtySpec(nil, resolveTermType("", ""))
 	if err != nil {
 		t.Fatalf("newForcedPtySpec(nil) returned error: %s", err)
 	}
-	if spec.Term != "xterm" {
-		t.Errorf("term = %q, want xterm", spec.Term)
+	if spec.Term != "xterm-256color" {
+		t.Errorf("term = %q, want xterm-256color", spec.Term)
 	}
 	if spec.Columns != 80 || spec.Rows != 24 {
 		t.Errorf("geometry = %dx%d, want 80x24", spec.Columns, spec.Rows)
 	}
 }
 
-// The terminal type of the local console is propagated, as OpenSSH does.
-func TestNewForcedPtySpecUsesTerminalEnvironment(t *testing.T) {
-	t.Setenv("TERM", "xterm-256color")
-	spec, err := newForcedPtySpec(nil)
+// The caller-resolved terminal type is passed through to the pty request,
+// as OpenSSH does with the local console type.
+func TestNewForcedPtySpecUsesResolvedTerm(t *testing.T) {
+	spec, err := newForcedPtySpec(nil, "xterm-256color")
 	if err != nil {
 		t.Fatalf("newForcedPtySpec(nil) returned error: %s", err)
 	}

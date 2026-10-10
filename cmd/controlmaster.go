@@ -92,10 +92,9 @@ func runSlaveCommand(ctx context.Context, controlPath string, command []string, 
 			log.Warn().Msgf("could not get window size: %+v, using 80x24", err)
 			windowSize.NCols, windowSize.NRows = 80, 24
 		}
-		termType := os.Getenv("TERM")
-		if termType == "" {
-			termType = "xterm"
-		}
+		// a control-master slave has no -o Term context of its own: the
+		// local environment applies, then the built-in default
+		termType := resolveTermType("", "")
 		spec.Pty = &client.PtySpec{
 			Term:        termType,
 			Columns:     uint64(windowSize.NCols),

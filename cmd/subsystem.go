@@ -31,7 +31,7 @@ const sftpSubsystemName = "sftp"
 // Agent and reverse forwarding are not offered here: they are wired by
 // client.OpenSession, which issues a shell/exec request instead of a subsystem
 // request, so -s is rejected together with them at the command line.
-func runSubsystemSession(ctx context.Context, c *client.Client, tty *os.File, name string, forcePTY bool) error {
+func runSubsystemSession(ctx context.Context, c *client.Client, tty *os.File, name string, forcePTY bool, termType string) error {
 	channel, err := c.OpenChannel("session", 30000, 0)
 	if err != nil {
 		return fmt.Errorf("could not open channel: %w", err)
@@ -39,7 +39,7 @@ func runSubsystemSession(ctx context.Context, c *client.Client, tty *os.File, na
 
 	ptyRequested := false
 	if forcePTY {
-		ptySpec, err := newForcedPtySpec(tty)
+		ptySpec, err := newForcedPtySpec(tty, termType)
 		if err != nil {
 			return err
 		}
