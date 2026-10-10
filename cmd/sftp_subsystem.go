@@ -303,11 +303,31 @@ func (h *sftpHandlers) Filecmd(request *sftp.Request) error {
 		return h.link(request, false)
 	case "Symlink":
 		return h.link(request, true)
+	case "Setstat":
+		return h.setstat(request)
 	default:
-		// Setstat and friends arrive as raw attribute blobs; the Go client
-		// does not rely on them, so they stay unsupported until needed
+		// Setstat's siblings (fsetstat and friends) arrive as raw attribute
+		// blobs; only the timestamp form is needed — by our own recursive
+		// transfer client, which stamps the source mtime onto the remote
 		return sftp.ErrSSHFxOpUnsupported
 	}
+}
+
+// setstat applies a SETSTAT request: only the timestamps are honored — the
+// recursive-transfer client stamps the remote with the source mtime so the
+// next --continue can skip by size+mtime (R7). Mode/uid/gid/size requests
+// stay unsupported: nothing in this repo issues them.
+func (h *sftpHandlers) setstat(request *sftp.Request) error {
+	attrs := request.Attributes()
+	if attrs == nil || (attrs.Mtime == 0 && attrs.Atime == 0) {
+		return sftp.ErrSSHFxOpUnsupported
+	}
+	name, err := h.resolveJailed(request.Filepath)
+	if err != nil {
+		return err
+	}
+	modTime := attrs.ModTime()
+	return os.Chtimes(name, modTime, modTime)
 }
 
 func (h *sftpHandlers) mkdir(request *sftp.Request) error {

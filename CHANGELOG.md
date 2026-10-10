@@ -4,6 +4,11 @@ All notable changes to the **nagual2 fork** of SSH3, starting from the first for
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); each section maps to a release tag, newest first.
 
+## [0.1.30] - 2026-10-10
+
+### Changed
+- **`--continue` skips by size+mtime, not by size alone** (R7, `cmd/sftp_client.go`, `cmd/sftp_subsystem.go`): the resume decision trusted the file size only, so a source rewritten in place (same size, new content) was silently skipped as "already fully uploaded" — the message asserted a fact the code never checked. Every transfer path (single-file and tree, upload and download) now stamps the peer with the source mtime after a successful transfer — the server's sftp subsystem learned the timestamp form of SETSTAT for that (`setstat`, jail-resolved like every other path) — and skips only when both size and mtime match; a size match with a differing mtime re-transfers, so a stale copy can no longer hide behind an equal length. Transition cost: the first `--continue` over a tree uploaded by an older client re-transfers it once (the stamped mtime is missing there), later runs skip again. The skip/re-transfer messages now state what was actually compared.
+
 ## [0.1.29] - 2026-10-09
 
 ### Security
