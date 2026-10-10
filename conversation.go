@@ -229,8 +229,21 @@ func (c *Conversation) EstablishClientConversation(req *http.Request, qconn *qui
 				if convID == uint64(c.controlStream.StreamID()) {
 					err = c.AddDatagram(c.Context(), dgram[buf.Size()-int64(buf.Len()):])
 					if err != nil {
-						log.Error().Msgf("could not add datagram to conv id %d: %s", c.controlStream.StreamID(), err)
-						return
+						switch e := err.(type) {
+						case util.ChannelNotFound:
+							// F-14: a datagram for an unknown channel is a
+							// per-channel condition — the channel may have
+							// been closed and pruned (P4-02) while the
+							// datagram was in flight. Mirroring the server
+							// loop (server.go), it is dropped with a warning
+							// instead of killing every channel's datagram
+							// delivery on this conversation.
+							log.Warn().Msgf("dropping datagram for unknown channel %d on conversation %d",
+								e.ChannelID, c.controlStream.StreamID())
+						default:
+							log.Error().Msgf("could not add datagram to conv id %d: %s", c.controlStream.StreamID(), err)
+							return
+						}
 					}
 				} else {
 					log.Error().Msgf("discarding datagram with invalid conv id %d", convID)
