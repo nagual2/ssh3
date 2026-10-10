@@ -182,6 +182,21 @@ func clampPeerMaxPacketSize(peer, local uint64) uint64 {
 	return util.MinUint64(peer, local)
 }
 
+// clampLocalMaxPacketSize floors the locally advertised value at channel
+// construction (P4-04): WriteData chunks at MaxPacketSize - emptyMsgLen, so a
+// local value at or below the empty-frame length spins the write loop or
+// underflows it. Every opener passes the same 30000 constant, which kept the
+// invariant a property of the call sites; pinning it here — where the header
+// and the ChannelInfo are built — holds it for any future caller. Inbound
+// channels arrive with the already-floored peer value, so this is a no-op
+// for them.
+func clampLocalMaxPacketSize(local uint64) uint64 {
+	if local < minPeerMaxPacketSize {
+		return minPeerMaxPacketSize
+	}
+	return local
+}
+
 // The channel-type role table as allow-lists (S2-03/P3-03): an endpoint
 // accepts only the channel types the peer's role may open. The negative
 // checks this replaces refused the four known cross-role names, while any
@@ -293,6 +308,9 @@ func parseTCPForwardingHeader(channelID uint64, buf util.Reader) (*net.TCPAddr, 
 func NewChannel(conversationStreamID uint64, conversationID ConversationID, channelID uint64, channelType string, maxPacketSize uint64, recv *quic.Stream,
 	send io.WriteCloser, datagramSender util.SSH3DatagramSenderFunc, channelCloseListener channelCloseListener, sendHeader bool, confirmSent bool,
 	confirmReceived bool, datagramsQueueSize uint64, additonalHeaderBytes []byte) Channel {
+	// P4-04: floor the local advertisement before it reaches the header and
+	// the ChannelInfo; see clampLocalMaxPacketSize
+	maxPacketSize = clampLocalMaxPacketSize(maxPacketSize)
 	var header []byte = nil
 	if sendHeader {
 		header = buildHeader(conversationStreamID, channelType, maxPacketSize, additonalHeaderBytes)
@@ -376,13 +394,23 @@ func (c *channelImpl) WriteData(dataBuf []byte, dataType ssh3.SSHDataType) (int,
 		return 0, err
 	}
 	written := 0
+	emptyMsgLen := uint64((&ssh3.DataOrExtendedDataMessage{DataType: dataType, Data: ""}).Length())
+	// P4-04: a MaxPacketSize at or below the frame's own header length leaves
+	// the chunk at zero — or underflows it — and the loop below would spin
+	// forever without writing a byte. The construction-time floor makes this
+	// unreachable for well-formed channels; the check keeps it unreachable
+	// for every other.
+	if c.ChannelInfo.MaxPacketSize <= emptyMsgLen {
+		return 0, fmt.Errorf("channel %d: max packet size %d does not exceed the %d-byte data frame header",
+			c.ChannelID(), c.ChannelInfo.MaxPacketSize, emptyMsgLen)
+	}
+	chunkSize := c.ChannelInfo.MaxPacketSize - emptyMsgLen
 	for len(dataBuf) > 0 {
 		dataMsg := &ssh3.DataOrExtendedDataMessage{
 			DataType: dataType,
 			Data:     "",
 		}
-		emptyMsgLen := dataMsg.Length()
-		msgLen := util.MinUint64(c.ChannelInfo.MaxPacketSize-uint64(emptyMsgLen), uint64(len(dataBuf)))
+		msgLen := util.MinUint64(chunkSize, uint64(len(dataBuf)))
 		chunk := dataBuf[:msgLen]
 		dataBuf = dataBuf[msgLen:]
 
@@ -458,6 +486,14 @@ func (c *channelImpl) CancelRead() {
 
 func (c *channelImpl) Close() {
 	c.send.Close()
+	// P4-02: the listener was wired at construction but nothing invoked it,
+	// so the manager kept every channel — including ones the budget refused
+	// right after AcceptChannel registered them — until the conversation
+	// died; prune on close. removeChannel deletes under the manager's lock
+	// and is idempotent, so a repeated close is safe.
+	if c.channelCloseListener != nil {
+		c.channelCloseListener.onChannelClose(c)
+	}
 }
 
 func (c *channelImpl) MaxPacketSize() uint64 {

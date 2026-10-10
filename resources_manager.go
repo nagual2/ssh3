@@ -12,6 +12,14 @@ import (
 // while waiting for that channel to be registered by its owner.
 const danglingDatagramQueueSize = 64
 
+// maxDanglingDatagramQueues bounds how many channels may have a dangling
+// queue at the same time (P4-01): each entry is a buffered queue plus its
+// datagrams, retained until a channel with that ID registers or the
+// conversation dies, so an unbounded map let an authenticated peer grow it
+// by cycling channel IDs. Far above any legitimate concurrent-channel count,
+// whose datagrams race the registration by microseconds.
+const maxDanglingDatagramQueues = 256
+
 type ControlStreamID = uint64
 
 type conversationsManager struct {
@@ -78,6 +86,16 @@ func (m *channelsManager) addDanglingDatagramsQueue(id util.ChannelID, datagram 
 	}
 	queue, ok := m.danglingDgramQueues[id]
 	if !ok {
+		// P4-01: a dangling queue is retained until a channel with this ID
+		// registers or the conversation dies; without a cap a peer cycling
+		// unknown channel IDs grows the map — and its buffered datagrams —
+		// for the conversation's whole lifetime. Only brand-new IDs are
+		// capped: a legitimate late datagram extends the queue it already has.
+		if len(m.danglingDgramQueues) >= maxDanglingDatagramQueues {
+			log.Warn().Msgf("too many dangling datagram queues (%d), dropping datagram for unregistered channel %d",
+				maxDanglingDatagramQueues, id)
+			return
+		}
 		queue = util.NewDatagramsQueue(danglingDatagramQueueSize)
 		m.danglingDgramQueues[id] = queue
 	}

@@ -4,6 +4,14 @@ All notable changes to the **nagual2 fork** of SSH3, starting from the first for
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); each section maps to a release tag, newest first.
 
+## [0.1.31] - 2026-10-10
+
+### Security
+- **Closed channels are pruned from the conversation's channel manager** (P4-02, `channel.go`; pass-4 audit, `docs/SECURITY_AUDIT_PASS4_2026-10-10.md`): the close listener was wired into every channel at construction but nothing ever invoked it, so the manager kept every channel ever accepted or opened — including ones the channel budget refused right after `AcceptChannel` registered them — for the conversation's whole lifetime. `Close` now notifies the listener, which removes the channel (and, with it, the last reference to its datagram queue) from the map; the removal is idempotent and skipped safely when no listener is set.
+- **Dangling datagram queues are bounded per conversation** (P4-01, `resources_manager.go`): a datagram naming a channel that never registers pins a dangling queue (64 slots plus its buffered datagrams) until the conversation dies, and nothing capped their number — an authenticated peer holding one conversation open could grow the map without bound by cycling channel IDs. Brand-new dangling queues are now capped at 256 per conversation (far above any legitimate concurrent-channel count, whose datagrams race the registration by microseconds); beyond the cap, datagrams for unregistered channels are dropped with a warning. Queues already created still extend, and delivery on a late registration is unchanged (`resources_manager_test.go`).
+- **The P3-01 session-prune fix is pinned by a regression test** (P4-03, `cmd/ssh3-server.go`, `cmd/session_admission_test.go`): the insert-before-admission / undo-on-refusal pairing lived inline in the accept loop and was verified only by reading the code. It is extracted into `admitSessionChannel`, and the tests pin both the refusal path (the entry is pruned, the session goroutine never starts) and the admission path (the entry is visible to the spawner, as the request handlers require).
+- **The local `maxPacketSize` advertisement is floored at construction** (P4-04, `channel.go`): the P3-02 floor bounded the peer value only, leaving the `MaxPacketSize > emptyMsgLen` invariant an unwritten property of the call sites (every opener passes the same 30000 constant). `NewChannel` now floors the local value where the header and the `ChannelInfo` are built — a no-op for inbound channels, which arrive with the already-floored peer value — and `WriteData` fails fast on a `MaxPacketSize` at or below the empty-frame header length instead of spinning in a zero-progress loop.
+
 ## [0.1.30] - 2026-10-10
 
 ### Changed
