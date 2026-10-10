@@ -123,6 +123,27 @@ type runningSession struct {
 // var runningSessions = make(map[ssh3.Channel]*runningSession)
 var runningSessions = util.NewSyncMap[ssh3.Channel, *runningSession]()
 
+// admitSessionChannel registers a session channel in runningSessions before
+// admission — the request handlers resolve the session through that map —
+// and undoes the registration when the channel budget refuses the channel
+// (P3-01): on a refusal the session goroutine, which owns the prune on
+// normal termination, never starts. spawn is the conversation's
+// budget-checked channel spawner; the seam keeps the insert/undo pairing
+// testable instead of buried in the accept loop (P4-03).
+func admitSessionChannel(sessions *util.SyncMap[ssh3.Channel, *runningSession], channels *budget, channel ssh3.Channel, spawn func(ssh3.Channel, func()) bool, run func()) bool {
+	sessions.Insert(channel, &runningSession{
+		channelState:   LARVAL,
+		pty:            nil,
+		runningCmd:     nil,
+		exitStatusSent: make(chan struct{}),
+	})
+	if !spawn(channel, run) {
+		sessions.Delete(channel)
+		return false
+	}
+	return true
+}
+
 func setWinsize(f *os.File, charWidth, charHeight, pixWidth, pixHeight uint64) {
 	syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(syscall.TIOCSWINSZ),
 		uintptr(unsafe.Pointer(&struct{ h, w, x, y uint16 }{uint16(charHeight), uint16(charWidth), uint16(pixWidth), uint16(pixHeight)})))
@@ -1330,13 +1351,7 @@ func ServerMain() int {
 					continue
 				}
 				log.Debug().Msgf("accepted session channel %d of type %q", channel.ChannelID(), channel.ChannelType())
-				runningSessions.Insert(channel, &runningSession{
-					channelState:   LARVAL,
-					pty:            nil,
-					runningCmd:     nil,
-					exitStatusSent: make(chan struct{}),
-				})
-				if !spawnChannel(channel, func() {
+				admitSessionChannel(&runningSessions, channels, channel, spawnChannel, func() {
 					defer util.PanicGuard("cmd/ssh3-server.go:1197")()
 					// handle the main sessionChannel, once it ends, the whole conversation ends
 					// LIFO order matters: the channel (with its buffered exit-status
@@ -1450,13 +1465,7 @@ func ServerMain() int {
 							return
 						}
 					}
-				}) {
-					// P3-01: the session goroutine owns the map prune, and
-					// the refusal means it never started — drop the entry
-					// here or every budget-refused session leaks it for the
-					// process lifetime
-					runningSessions.Delete(channel)
-				}
+				})
 			}
 
 		}

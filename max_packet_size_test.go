@@ -1,6 +1,11 @@
 package ssh3
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	ssh3 "github.com/francoismichel/ssh3/message"
+)
 
 // clampPeerMaxPacketSize is the S2-01/P3-02 bound: the peer's advertised
 // value sizes the endpoint's per-channel read buffers, so it must never
@@ -36,5 +41,45 @@ func TestClampPeerMaxPacketSizeSmallLocal(t *testing.T) {
 	const local = 2048
 	if got := clampPeerMaxPacketSize(0, local); got != local {
 		t.Errorf("clampPeerMaxPacketSize(0, %d) = %d, want %d", local, got, local)
+	}
+}
+
+// P4-04: the peer-side floor protected the write loop only because every
+// opener passed the 30000 constant; the local advertisement itself must be
+// floored at construction, where both the header and the ChannelInfo are
+// built, so the MaxPacketSize > emptyMsgLen invariant stops depending on
+// call-site discipline
+func TestNewChannelFloorsLocalMaxPacketSize(t *testing.T) {
+	for _, local := range []uint64{0, 1, 2, 4095} {
+		ch := NewChannel(0, ConversationID{}, 1, "session", local, nil, &nopWriteCloser{}, nil, nil, false, false, false, 1, nil)
+		if got := ch.MaxPacketSize(); got != minPeerMaxPacketSize {
+			t.Errorf("NewChannel with local maxPacketSize %d advertises %d, want the floor %d", local, got, minPeerMaxPacketSize)
+		}
+	}
+}
+
+// P4-04: a MaxPacketSize at or below the empty data-frame length makes the
+// chunk size zero (or, below it, underflow): the loop must fail instead of
+// making no progress forever
+func TestWriteDataRejectsMaxPacketSizeAtOrBelowHeaderLen(t *testing.T) {
+	emptyMsgLen := uint64((&ssh3.DataOrExtendedDataMessage{DataType: ssh3.SSH_EXTENDED_DATA_NONE, Data: ""}).Length())
+	for _, maxPacketSize := range []uint64{emptyMsgLen, emptyMsgLen - 1} {
+		ch := &channelImpl{
+			ChannelInfo: ChannelInfo{ChannelID: 1, MaxPacketSize: maxPacketSize},
+			send:        &nopWriteCloser{},
+		}
+		done := make(chan error, 1)
+		go func() {
+			_, err := ch.WriteData([]byte("payload"), ssh3.SSH_EXTENDED_DATA_NONE)
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Errorf("WriteData with MaxPacketSize %d must fail, not write zero-progress chunks", maxPacketSize)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("WriteData with MaxPacketSize %d did not return: the zero-progress write loop is back", maxPacketSize)
+		}
 	}
 }
